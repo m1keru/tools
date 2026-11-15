@@ -60,8 +60,9 @@ main() {
 
   section "resources"
   # /proc/meminfo, not free(1): old procps prints "cached" in the column where
-  # new ones print "available". MemAvailable itself needs Linux 3.14.
-  row memory "$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} /^(MemFree|Buffers|Cached):/{f+=$2} END{if(a=="")a=f; printf "%d MB total, %d MB available", t/1024, a/1024}' /proc/meminfo)"
+  # new ones print "available". MemAvailable itself needs Linux 3.14; before
+  # it, count free + buffers + cache, less the shared memory inside "Cached".
+  row memory "$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} /^(MemFree|Buffers|Cached):/{f+=$2} /^Shmem:/{f-=$2} END{if(a=="")a=f; printf "%d MB total, %d MB available", t/1024, a/1024}' /proc/meminfo)"
   row disk-root "$(df -Ph / | awk 'NR==2{print $4" free of "$2}')"
   if [ -d /opt ]; then row disk-opt "$(df -Ph /opt | awk 'NR==2{print $4" free of "$2}')"; fi
   row load "$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
