@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -16,6 +17,8 @@ type fakeHost struct {
 	kernel  string // uname -r
 	arch    string // uname -m
 	systemd string // systemd version; empty means another init system
+	sysv    bool   // sysvinit with start-stop-daemon and update-rc.d (Debian family)
+	noInitd bool   // those tools are installed, but there is no /etc/init.d (a container)
 	tcpBusy []int  // ports something already listens on
 	udpBusy []int
 	missing []string // tools that are not installed
@@ -90,6 +93,22 @@ case "$1" in -ltn) %s ;; -lun) %s ;; esac`, listen(h.tcpBusy, "LISTEN")+":", lis
 		env = append(env, "OBHOD_SYSTEMD_DIR="+dir)
 	} else {
 		env = append(env, "OBHOD_SYSTEMD_DIR="+filepath.Join(dir, "absent"))
+		if h.sysv {
+			fake("start-stop-daemon", "exit 0")
+			fake("update-rc.d", "exit 0")
+			initd := filepath.Join(dir, "init.d")
+			if !h.noInitd {
+				if err := os.Mkdir(initd, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if h.running {
+				if err := os.WriteFile(filepath.Join(initd, "obhod-xray"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env = append(env, "OBHOD_INITD_DIR="+initd)
+		}
 	}
 	absent := map[string]bool{}
 	for _, m := range h.missing {
@@ -134,7 +153,7 @@ func TestPreflightRefusals(t *testing.T) {
 		want   string
 	}{
 		{"kernel too old for the Go runtime", func(h *fakeHost) { h.kernel = "2.6.32-754.el6.x86_64" }, "kernel 2.6.32-754.el6.x86_64 is too old"},
-		{"no systemd", func(h *fakeHost) { h.systemd = "" }, "systemd is required"},
+		{"no init system we know", func(h *fakeHost) { h.systemd = "" }, "no supported init system"},
 		{"tcp port taken", func(h *fakeHost) { h.tcpBusy = []int{80, 443} }, "TCP port 443 is already in use"},
 		{"udp port taken", func(h *fakeHost) { h.udpBusy = []int{443} }, "UDP port 443 is already in use"},
 		{"tool missing", func(h *fakeHost) { h.missing = []string{"unzip"} }, "missing tools: unzip"},
@@ -182,6 +201,68 @@ func TestPreflightOldHostWithHighPorts(t *testing.T) {
 	out, ok := preflight(t, st, n, h)
 	if !ok {
 		t.Fatalf("a node on high ports must fit beside existing services:\n%s", out)
+	}
+}
+
+// oldDebian is a host from before systemd: sysvinit and a kernel without
+// ambient capabilities. Xray itself runs there; only the service wrapper
+// differs.
+func oldDebian() fakeHost {
+	return fakeHost{kernel: "3.2.0-4-amd64", arch: "x86_64", sysv: true, freeKB: 5 << 20}
+}
+
+func TestPreflightSysvinitHost(t *testing.T) {
+	st, n := highPortNode(t)
+	out, ok := preflight(t, st, n, oldDebian())
+	if !ok || !strings.Contains(out, "sysvinit") || !strings.Contains(out, "preflight passed") {
+		t.Fatalf("a sysvinit host must be accepted on high ports: ok=%v\n%s", ok, out)
+	}
+
+	// Nothing there can hand an unprivileged service a port below 1024.
+	out, ok = preflight(t, st, st.node("nl1"), oldDebian())
+	if ok || !strings.Contains(out, "move the node to ports above 1024") {
+		t.Errorf("low ports on sysvinit: ok=%v\n%s", ok, out)
+	}
+
+	// An update of a running node keeps its own ports.
+	h := oldDebian()
+	h.running, h.tcpBusy = true, []int{8443, 9443}
+	if out, ok := preflight(t, st, n, h); !ok {
+		t.Errorf("update of a running sysvinit node refused:\n%s", out)
+	}
+	h.running = false
+	if out, ok := preflight(t, st, n, h); ok || !strings.Contains(out, "TCP port 8443 is already in use") {
+		t.Errorf("busy ports of a stopped node must be a conflict: ok=%v\n%s", ok, out)
+	}
+
+	// dpkg ships start-stop-daemon into containers that have no init at all:
+	// say so in the preflight, not halfway through the install.
+	h = oldDebian()
+	h.noInitd = true
+	if out, ok := preflight(t, st, n, h); ok || !strings.Contains(out, "no supported init system") {
+		t.Errorf("a host without /etc/init.d must be refused: ok=%v\n%s", ok, out)
+	}
+}
+
+// The sysvinit service must be as unprivileged as the systemd one and must
+// come back after a reboot.
+func TestSysvinitServiceShape(t *testing.T) {
+	st := testState(t)
+	script, err := installScript(st, st.node("nl1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(script)
+	for _, want := range []string{
+		"### BEGIN INIT INFO",
+		"# Default-Start:     2 3 4 5",
+		`--chuid $SVC_USER`,
+		`update-rc.d "$UNIT" defaults`,
+		`update-rc.d -f "$UNIT" remove`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("installer lacks %q", want)
+		}
 	}
 }
 
@@ -254,6 +335,24 @@ func TestInstallerWideChangesAreOptIn(t *testing.T) {
 	// missing tool is a preflight refusal, tested above.
 	if !strings.Contains(s, `if [ -n "$need" ] && [ "$deps" = no ]; then`) {
 		t.Error("missing tools must be refused unless --install-deps is given")
+	}
+}
+
+// Xray picks the config parser by file extension and refuses a name it does
+// not know ("Failed to get format of .../config.json.new"), so the candidate
+// config must carry a .json name while it is being checked.
+func TestInstallerChecksConfigUnderJSONName(t *testing.T) {
+	st := testState(t)
+	script, err := installScript(st, st.node("nl1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^\s*local new="([^"]+)"$`).FindStringSubmatch(string(script))
+	if m == nil {
+		t.Fatal("cannot find where the installer names the candidate config")
+	}
+	if !strings.HasSuffix(m[1], ".json") {
+		t.Errorf("candidate config is %q: Xray cannot tell its format", m[1])
 	}
 }
 

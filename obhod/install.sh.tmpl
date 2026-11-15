@@ -5,9 +5,9 @@
 #   ssh root@SERVER 'bash -s' < install.sh                  install or update
 #   ssh root@SERVER 'bash -s -- --uninstall' < install.sh
 #
-# By default it touches only /opt/obhod, one systemd unit and one system
-# user, so it can run on a host that does other work. Anything wider is
-# opt-in:
+# By default it touches only /opt/obhod, one service definition (a systemd
+# unit, or an init script on a sysvinit host) and one system user, so it can
+# run on a host that does other work. Anything wider is opt-in:
 #
 #   --install-deps    install missing curl/unzip with the package manager
 #   --open-firewall   allow the node's ports in an active ufw or firewalld
@@ -25,6 +25,9 @@ UNIT=obhod-xray
 SVC_USER=obhod
 TCP_PORTS='{{.TCPPorts}}'
 UDP_PORTS='{{.UDPPorts}}'
+# The override exists for the installer's own tests.
+INITD="${OBHOD_INITD_DIR:-/etc/init.d}/$UNIT"
+INIT="" # systemd or sysv; main decides
 
 say() { printf '>> %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -42,6 +45,36 @@ port_busy() {
     netstat "$flag" 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]$2\$"
   else
     return 1
+  fi
+}
+
+# Xray is one static binary and does not care which init starts it: a
+# systemd unit where systemd is the running init, an init script built on
+# start-stop-daemon on older Debian-family hosts.
+svc_active() {
+  if [ "$INIT" = systemd ]; then
+    systemctl is-active -q "$UNIT" 2>/dev/null
+  else
+    [ -x "$INITD" ] && "$INITD" status >/dev/null 2>&1
+  fi
+}
+
+svc_restart() {
+  if [ "$INIT" = systemd ]; then
+    systemctl daemon-reload
+    systemctl enable -q "$UNIT"
+    systemctl restart "$UNIT"
+  else
+    update-rc.d "$UNIT" defaults >/dev/null
+    "$INITD" restart
+  fi
+}
+
+svc_log() {
+  if [ "$INIT" = systemd ]; then
+    journalctl -u "$UNIT" -n 30 --no-pager
+  else
+    tail -n 30 "$PREFIX/log/xray.log"
   fi
 }
 
@@ -71,14 +104,25 @@ main() {
   # The directory systemd creates when it is the running init. The override
   # exists for the installer's own tests.
   local sd_dir="${OBHOD_SYSTEMD_DIR:-/run/systemd/system}"
-  if [ ! -d "$sd_dir" ] || ! command -v systemctl >/dev/null 2>&1; then
-    die "systemd is required; this host runs a different init system"
+  if [ -d "$sd_dir" ] && command -v systemctl >/dev/null 2>&1; then
+    INIT=systemd
+  elif [ -d "${INITD%/*}" ] && command -v start-stop-daemon >/dev/null 2>&1 && command -v update-rc.d >/dev/null 2>&1; then
+    INIT=sysv
+  else
+    die "no supported init system: this host has neither systemd nor sysvinit with start-stop-daemon"
   fi
 
   if [ "$mode" = uninstall ]; then
-    systemctl disable --now "$UNIT" 2>/dev/null || true
-    rm -f "/etc/systemd/system/$UNIT.service" /etc/sysctl.d/99-obhod.conf
-    systemctl daemon-reload
+    if [ "$INIT" = systemd ]; then
+      systemctl disable --now "$UNIT" 2>/dev/null || true
+      rm -f "/etc/systemd/system/$UNIT.service"
+      systemctl daemon-reload
+    else
+      if [ -x "$INITD" ]; then "$INITD" stop || true; fi
+      update-rc.d -f "$UNIT" remove >/dev/null 2>&1 || true
+      rm -f "$INITD"
+    fi
+    rm -f /etc/sysctl.d/99-obhod.conf
     rm -rf "$PREFIX"
     if id "$SVC_USER" >/dev/null 2>&1; then userdel "$SVC_USER" || true; fi
     say "removed (firewall rules and already applied sysctl values, if any, stay)"
@@ -87,7 +131,7 @@ main() {
 
   # ---- Preflight: read-only. Every problem is collected and reported
   # ---- before anything on the host is changed.
-  local problems="" asset="" kver kmaj kmin sdver ambient=yes lowport=no need="" p tool
+  local problems="" asset="" kver kmaj kmin sdver=0 initdesc=sysvinit ambient=yes lowport=no need="" p tool
 
   case "$(uname -m)" in
     x86_64 | amd64) asset=Xray-linux-64.zip ;;
@@ -112,15 +156,18 @@ main() {
   fi
 
   # Binding a port below 1024 as an unprivileged user relies on ambient
-  # capabilities: systemd 229+ on Linux 4.3+.
-  sdver="$(systemctl --version 2>/dev/null | awk 'NR==1{print $2}')"
-  case "$sdver" in '' | *[!0-9]*) sdver=0 ;; esac
+  # capabilities: systemd 229+ on Linux 4.3+. Sysvinit has no equivalent.
+  if [ "$INIT" = systemd ]; then
+    sdver="$(systemctl --version 2>/dev/null | awk 'NR==1{print $2}')"
+    case "$sdver" in '' | *[!0-9]*) sdver=0 ;; esac
+    initdesc="systemd $sdver"
+  fi
   if [ "$sdver" -lt 229 ] || ! ver_ge "$kmaj" "$kmin" 4 3; then ambient=no; fi
   for p in $TCP_PORTS $UDP_PORTS; do
     if [ "$p" -lt 1024 ]; then lowport=yes; fi
   done
   if [ "$lowport" = yes ] && [ "$ambient" = no ]; then
-    problems="$problems\n- this host (systemd $sdver, kernel $kver) cannot give an unprivileged service a port below 1024: move the node to ports above 1024"
+    problems="$problems\n- this host ($initdesc, kernel $kver) cannot give an unprivileged service a port below 1024: move the node to ports above 1024"
   fi
 
   for tool in unzip sha256sum; do
@@ -135,7 +182,7 @@ main() {
   fi
 
   # Ports held by an earlier run of this node are ours to reuse.
-  if ! systemctl is-active -q "$UNIT" 2>/dev/null; then
+  if ! svc_active; then
     for p in $TCP_PORTS; do
       if port_busy tcp "$p"; then problems="$problems\n- TCP port $p is already in use"; fi
     done
@@ -158,7 +205,7 @@ main() {
     fw=firewalld
   fi
 
-  say "node {{.Node}}: kernel $kver, systemd $sdver, $(uname -m)"
+  say "node {{.Node}}: kernel $kver, $initdesc, $(uname -m)"
   say "ports: TCP [$TCP_PORTS] UDP [$UDP_PORTS]; firewall manager: $fw"
   if [ -n "$problems" ]; then
     printf 'cannot install:%b\n' "$problems" >&2
@@ -224,7 +271,7 @@ main() {
     printf '%s\n' "$XRAY_VERSION" > "$PREFIX/bin/.version"
   fi
 
-  local new="$PREFIX/etc/config.json.new"
+  local new="$PREFIX/etc/config.new.json"
   umask 027
   cat > "$new" <<'OBHOD_CONFIG_EOF'
 {{.Config}}
@@ -249,7 +296,8 @@ OBHOD_CONFIG_EOF
     caps="AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE"
   fi
-  cat > "/etc/systemd/system/$UNIT.service" <<UNIT_EOF
+  if [ "$INIT" = systemd ]; then
+    cat > "/etc/systemd/system/$UNIT.service" <<UNIT_EOF
 [Unit]
 Description=Xray (obhod node {{.Node}})
 After=network-online.target
@@ -274,6 +322,48 @@ ProtectControlGroups=true
 [Install]
 WantedBy=multi-user.target
 UNIT_EOF
+  else
+    install -d -m 0750 "$PREFIX/log"
+    chown "$SVC_USER" "$PREFIX/log"
+    # shortcut: nothing restarts Xray if it dies and its log is never rotated;
+    # add respawn and logrotate, or move the host to systemd, if either bites.
+    cat > "$INITD" <<INIT_EOF
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          $UNIT
+# Required-Start:    \$network \$remote_fs
+# Required-Stop:     \$network \$remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Xray (obhod node {{.Node}})
+### END INIT INFO
+PIDFILE=/var/run/$UNIT.pid
+case "\$1" in
+  start)
+    ulimit -n 65536 2>/dev/null || true
+    start-stop-daemon --start --quiet --oknodo --background --make-pidfile --pidfile "\$PIDFILE" \\
+      --user $SVC_USER --chuid $SVC_USER --startas /bin/sh -- -c \\
+      "exec env XRAY_LOCATION_ASSET=$PREFIX/share $PREFIX/bin/xray run -config $PREFIX/etc/config.json >>$PREFIX/log/xray.log 2>&1"
+    ;;
+  stop)
+    start-stop-daemon --stop --quiet --oknodo --retry 5 --pidfile "\$PIDFILE" --user $SVC_USER
+    rm -f "\$PIDFILE"
+    ;;
+  restart)
+    "\$0" stop
+    "\$0" start
+    ;;
+  status)
+    [ -f "\$PIDFILE" ] && kill -0 "\$(cat "\$PIDFILE")" 2>/dev/null
+    ;;
+  *)
+    echo "usage: \$0 start|stop|restart|status" >&2
+    exit 2
+    ;;
+esac
+INIT_EOF
+    chmod 0755 "$INITD"
+  fi
 
   if [ "$tune" = yes ]; then
     cat > /etc/sysctl.d/99-obhod.conf <<'SYSCTL_EOF'
@@ -302,15 +392,13 @@ SYSCTL_EOF
     say "$fw is active and was left alone: open the ports yourself or rerun with --open-firewall"
   fi
 
-  systemctl daemon-reload
-  systemctl enable -q "$UNIT"
-  systemctl restart "$UNIT"
+  svc_restart
   sleep 2
-  if ! systemctl is-active -q "$UNIT"; then
-    journalctl -u "$UNIT" -n 30 --no-pager >&2 || true
+  if ! svc_active; then
+    svc_log >&2 || true
     if [ -f "$PREFIX/etc/config.json.bak" ]; then
       cp -p "$PREFIX/etc/config.json.bak" "$PREFIX/etc/config.json"
-      systemctl restart "$UNIT" || true
+      svc_restart || true
       die "the new config did not start; the previous config was put back"
     fi
     die "$UNIT did not start; see the log above"
