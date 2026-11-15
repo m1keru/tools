@@ -100,7 +100,12 @@ func serverConfig(st *State, n *Node) obj {
 	// own loopback or LAN through it.
 	direct := obj{"tag": "direct", "protocol": "freedom"}
 	block := obj{"tag": "block", "protocol": "blackhole"}
-	rules := []any{obj{"protocol": []string{"bittorrent"}, "outboundTag": "block"}}
+	// Port 25 is how a compromised client turns a node into a spam source and
+	// gets its address onto mail blocklists; mail apps submit on 465 and 587.
+	rules := []any{
+		obj{"network": "tcp", "port": "25", "outboundTag": "block"},
+		obj{"protocol": []string{"bittorrent"}, "outboundTag": "block"},
+	}
 	var outbounds []any
 
 	switch {
