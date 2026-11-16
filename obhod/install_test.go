@@ -24,6 +24,13 @@ type fakeHost struct {
 	missing []string // tools that are not installed
 	running bool     // the node's own service is already up
 	freeKB  int
+	// What `iptables -S INPUT` prints, one rule per line; empty means the
+	// host has no iptables at all.
+	iptables string
+	// What `iptables -S OBHOD` prints: the chain an earlier run of the
+	// installer left. Empty means there is no such chain.
+	obhodChain string
+	ufw        bool // ufw is installed and active
 }
 
 func modernHost() fakeHost {
@@ -109,6 +116,25 @@ case "$1" in -ltn) %s ;; -lun) %s ;; esac`, listen(h.tcpBusy, "LISTEN")+":", lis
 			}
 			env = append(env, "OBHOD_INITD_DIR="+initd)
 		}
+	}
+	if h.iptables != "" {
+		quote := func(rules string) string {
+			var b strings.Builder
+			for _, rule := range strings.Split(strings.TrimSpace(rules), "\n") {
+				fmt.Fprintf(&b, " '%s'", strings.TrimSpace(rule))
+			}
+			return b.String()
+		}
+		// Asking for a chain that does not exist fails, as it does on a host
+		// where the node never opened anything.
+		chain := "exit 1"
+		if h.obhodChain != "" {
+			chain = "printf '%s\\n'" + quote(h.obhodChain)
+		}
+		fake("iptables", fmt.Sprintf(`case "$1 $2" in "-S INPUT") printf '%%s\n'%s ;; "-S OBHOD") %s ;; *) exit 1 ;; esac`, quote(h.iptables), chain))
+	}
+	if h.ufw {
+		fake("ufw", `echo "Status: active"`)
 	}
 	absent := map[string]bool{}
 	for _, m := range h.missing {
@@ -276,6 +302,227 @@ func TestPreflightAllowsUpdatingRunningNode(t *testing.T) {
 	}
 }
 
+// The rules of a host that closed a real node: everything arriving on eth0 is
+// rejected unless a rule above lets it in. No firewall manager owns them, so
+// the installer once reported a pass and left the node unreachable.
+const closedByIptables = `
+-P INPUT ACCEPT
+-A INPUT -i eth0 -p icmp -m comment --comment "100 accept all icmp requests in INPUT for eth0" -j ACCEPT
+-A INPUT -i eth0 -m state --state RELATED,ESTABLISHED -m comment --comment "101 accept related established" -j ACCEPT
+-A INPUT -i eth0 -p tcp -m multiport --dports 22,5201,8301,8302 -m set --match-set wan_networks src -m comment --comment "300 allow tcp" -j ACCEPT
+-A INPUT -i eth0 -m limit --limit 100/min -m comment --comment "998 log dropped packets in INPUT for eth0" -j NFLOG --nflog-group 1
+-A INPUT -i eth0 -m comment --comment "999 reject all other packets in INPUT for eth0" -j REJECT --reject-with icmp-port-unreachable`
+
+func TestPreflightSeesIptablesClosingPorts(t *testing.T) {
+	st := testState(t)
+	nl := st.node("nl1") // TCP 443 and 8443, UDP 443
+	for _, c := range []struct{ name, rules, closed string }{
+		{"everything else rejected on the public interface", closedByIptables, "tcp/443 tcp/8443 udp/443"},
+		{"drop policy with one of the ports let in", `
+-P INPUT DROP
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 443 -j ACCEPT`, "tcp/8443 udp/443"},
+		{"a port range counts", `
+-P INPUT DROP
+-A INPUT -p tcp -m multiport --dports 22,400:9000 -j ACCEPT`, "udp/443"},
+		// Loopback being open says nothing about the outside.
+		{"loopback accepted, the rest dropped", `
+-P INPUT ACCEPT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -j DROP`, "tcp/443 tcp/8443 udp/443"},
+		{"drop rules that single out an address or a state", `
+-P INPUT ACCEPT
+-A INPUT -s 203.0.113.9/32 -j DROP
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd`, ""},
+		{"accept-all placed above the drop", `
+-P INPUT DROP
+-A INPUT -j ACCEPT
+-A INPUT -j DROP`, ""},
+	} {
+		h := modernHost()
+		h.iptables = c.rules
+		out, ok := preflight(t, st, nl, h)
+		if !ok {
+			t.Errorf("%s: closed ports are a warning, not a refusal:\n%s", c.name, out)
+		}
+		warned := strings.Contains(out, "iptables rules close")
+		if c.closed == "" && warned {
+			t.Errorf("%s: warned about ports nothing closes:\n%s", c.name, out)
+		}
+		if c.closed != "" && !strings.Contains(out, "iptables rules close "+c.closed+":") {
+			t.Errorf("%s: want a warning that names %q:\n%s", c.name, c.closed, out)
+		}
+	}
+}
+
+// The node's own chain opens the ports only while INPUT still jumps to it. A
+// tool that manages the host's rules may take the jump out and leave the
+// chain, and the node is closed again.
+func TestPreflightCountsOwnChainOnlyWithItsJump(t *testing.T) {
+	st := testState(t)
+	nl := st.node("nl1")
+	const chain = `
+-N OBHOD
+-A OBHOD -s 192.0.2.44/32 -p tcp -m tcp --dport 443 -j ACCEPT
+-A OBHOD -s 192.0.2.44/32 -p tcp -m tcp --dport 8443 -j ACCEPT
+-A OBHOD -s 192.0.2.44/32 -p udp -m udp --dport 443 -j ACCEPT`
+
+	h := modernHost()
+	h.iptables = strings.Replace(closedByIptables, "-P INPUT ACCEPT", "-P INPUT ACCEPT\n-A INPUT -j OBHOD", 1)
+	h.obhodChain = chain
+	if out, _ := preflight(t, st, nl, h); strings.Contains(out, "iptables rules close") {
+		t.Errorf("the node's chain is in place and lets the ports in:\n%s", out)
+	}
+
+	h.iptables = closedByIptables
+	if out, _ := preflight(t, st, nl, h); !strings.Contains(out, "iptables rules close tcp/443 tcp/8443 udp/443:") {
+		t.Errorf("the jump is gone, so the chain opens nothing:\n%s", out)
+	}
+}
+
+// --open-firewall on such a host lets the ports through, and --from narrows
+// that to the addresses that are meant to connect.
+func TestPreflightOpenFirewallFrom(t *testing.T) {
+	st := testState(t)
+	nl := st.node("nl1")
+	closed := modernHost()
+	closed.iptables = closedByIptables
+
+	out, ok := preflight(t, st, nl, closed, "--open-firewall", "--from", "192.0.2.44,198.51.100.0/24")
+	if !ok || !strings.Contains(out, "would open the ports in iptables for 192.0.2.44 198.51.100.0/24") {
+		t.Errorf("--from on a closed host: ok=%v\n%s", ok, out)
+	}
+	if strings.Contains(out, "or open them yourself") {
+		t.Errorf("asked to open the ports and still told to do it by hand:\n%s", out)
+	}
+	out, ok = preflight(t, st, nl, closed, "--open-firewall")
+	if !ok || !strings.Contains(out, "would open the ports in iptables for any address") {
+		t.Errorf("--open-firewall alone on a closed host: ok=%v\n%s", ok, out)
+	}
+
+	// Nothing here closes the ports, and the installer never turns a firewall
+	// on, so the addresses would restrict nothing: say so.
+	out, ok = preflight(t, st, nl, modernHost(), "--open-firewall", "--from", "192.0.2.44")
+	if !ok || !strings.Contains(out, "--from changes nothing") {
+		t.Errorf("--from on an open host: ok=%v\n%s", ok, out)
+	}
+
+	sysv := oldDebian()
+	sysv.iptables = closedByIptables
+	_, hi := highPortNode(t)
+	if out, ok := preflight(t, st, hi, sysv, "--open-firewall", "--from", "192.0.2.44"); !ok {
+		t.Errorf("a sysvinit host can open its ports too:\n%s", out)
+	}
+
+	oldSystemd := closed
+	oldSystemd.systemd = "229"
+	withUfw := modernHost()
+	withUfw.ufw = true
+	for _, c := range []struct {
+		name string
+		h    fakeHost
+		args []string
+		want string
+	}{
+		{"--from alone", closed, []string{"--from", "192.0.2.44"}, "--from needs --open-firewall"},
+		{"a host name", closed, []string{"--open-firewall", "--from", "relay.example.org"}, "--from relay.example.org: not an IPv4 address or network"},
+		{"an IPv6 address", closed, []string{"--open-firewall", "--from", "192.0.2.44,2001:db8::1"}, "--from 2001:db8::1: not an IPv4 address or network"},
+		{"another firewall manager", withUfw, []string{"--open-firewall", "--from", "192.0.2.44"}, "--from works only with plain iptables rules"},
+		// The rules are put back by the service itself at every start, which
+		// takes a systemd that can run one command of a unit as root.
+		{"systemd before 231", oldSystemd, []string{"--open-firewall"}, "needs systemd 231"},
+	} {
+		out, ok := preflight(t, st, nl, c.h, c.args...)
+		if ok || !strings.Contains(out, c.want) {
+			t.Errorf("%s: ok=%v, want refusal containing %q\n%s", c.name, ok, c.want, out)
+		}
+	}
+}
+
+// The helper the installer leaves on a host with plain iptables rules is run
+// here with a stand-in iptables that writes down what it was asked to do. A
+// wrong rule either leaves the node closed or opens it to everyone.
+func TestFirewallHelperRules(t *testing.T) {
+	st := testState(t)
+	script, err := installScript(st, st.node("nl1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?s)<<'OBHOD_FIREWALL_EOF'\n(.*?)\nOBHOD_FIREWALL_EOF`).FindSubmatch(script)
+	if m == nil {
+		t.Fatal("the installer carries no firewall helper")
+	}
+	// The helper does nothing unless the installer wires it in: the service
+	// runs it at every start, and removing the node takes the rules out.
+	for _, want := range []string{
+		`fwhook="ExecStartPre=-+$PREFIX/bin/firewall open"`,
+		`if [ -x $PREFIX/bin/firewall ]; then $PREFIX/bin/firewall open || true; fi`,
+		`if [ -x "$PREFIX/bin/firewall" ]; then "$PREFIX/bin/firewall" close || true; fi`,
+	} {
+		if !strings.Contains(string(script), want) {
+			t.Errorf("installer lacks %q", want)
+		}
+	}
+	dir := t.TempDir()
+	for _, d := range []string{"bin", "etc", "stub"} {
+		if err := os.Mkdir(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	helper, conf, log := filepath.Join(dir, "bin", "firewall"), filepath.Join(dir, "etc", "firewall.conf"), filepath.Join(dir, "log")
+	if err := os.WriteFile(helper, append(m[1], '\n'), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stub := fmt.Sprintf("#!/bin/sh\necho \"$*\" >> %s\n", log)
+	if err := os.WriteFile(filepath.Join(dir, "stub", "iptables"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// run returns what iptables was asked to do. PATH holds nothing but the
+	// stand-in: the helper runs at boot and must not lean on other tools.
+	run := func(action, settings string) string {
+		t.Helper()
+		if err := os.WriteFile(conf, []byte(settings), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		os.Remove(log)
+		cmd := exec.Command("/bin/sh", helper, action)
+		cmd.Env = []string{"PATH=" + filepath.Join(dir, "stub")}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", action, err, out)
+		}
+		b, _ := os.ReadFile(log)
+		return string(b)
+	}
+	// Whatever an earlier run left is taken out first, so a second run does
+	// not pile the rules up.
+	const clear = "-D INPUT -j OBHOD\n-F OBHOD\n-X OBHOD\n"
+
+	got := run("open", "TCP='443 8443'\nUDP='443'\nFROM='192.0.2.44 198.51.100.0/24'\n")
+	want := clear + `-N OBHOD
+-A OBHOD -p tcp -s 192.0.2.44 --dport 443 -j ACCEPT
+-A OBHOD -p tcp -s 192.0.2.44 --dport 8443 -j ACCEPT
+-A OBHOD -p udp -s 192.0.2.44 --dport 443 -j ACCEPT
+-A OBHOD -p tcp -s 198.51.100.0/24 --dport 443 -j ACCEPT
+-A OBHOD -p tcp -s 198.51.100.0/24 --dport 8443 -j ACCEPT
+-A OBHOD -p udp -s 198.51.100.0/24 --dport 443 -j ACCEPT
+-I INPUT 1 -j OBHOD
+`
+	if got != want {
+		t.Errorf("open for two sources:\n got:\n%s\nwant:\n%s", got, want)
+	}
+
+	got = run("open", "TCP='8443'\nUDP=''\nFROM=''\n")
+	want = clear + "-N OBHOD\n-A OBHOD -p tcp -s 0.0.0.0/0 --dport 8443 -j ACCEPT\n-I INPUT 1 -j OBHOD\n"
+	if got != want {
+		t.Errorf("open for everyone:\n got:\n%s\nwant:\n%s", got, want)
+	}
+
+	if got = run("close", "TCP='443'\nUDP='443'\nFROM='192.0.2.44'\n"); got != clear {
+		t.Errorf("close must only take the rules out:\n%s", got)
+	}
+}
+
 func TestPreflightOptions(t *testing.T) {
 	st := testState(t)
 	nl := st.node("nl1")
@@ -324,6 +571,7 @@ func TestInstallerWideChangesAreOptIn(t *testing.T) {
 		"/etc/sysctl.d/99-obhod.conf <<": `if [ "$tune" = yes ]; then`,
 		"ufw allow":                      `if [ "$firewall" = yes ] && [ "$fw" = ufw ]; then`,
 		"firewall-cmd -q --permanent":    `elif [ "$firewall" = yes ] && [ "$fw" = firewalld ]; then`,
+		`etc/firewall.conf" <<`:          `if [ "$firewall" = yes ] && [ "$fw" = iptables ]; then`,
 	}
 	for action, guard := range guards {
 		a, g := strings.Index(s, action), strings.Index(s, guard)

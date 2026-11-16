@@ -10,7 +10,10 @@
 # run on a host that does other work. Anything wider is opt-in:
 #
 #   --install-deps    install missing curl/unzip with the package manager
-#   --open-firewall   allow the node's ports in an active ufw or firewalld
+#   --open-firewall   allow the node's ports in an active ufw or firewalld, or
+#                     through plain iptables rules that close them
+#   --from A,B        with --open-firewall and plain iptables rules: let in
+#                     only these IPv4 addresses or networks
 #   --tune-network    BBR and larger socket buffers; for a dedicated VPS only
 #   --xray-zip PATH   use an Xray release archive already on the server
 #
@@ -48,6 +51,60 @@ port_busy() {
   fi
 }
 
+# ipt_closed: which of the node's ports do plain iptables rules close? They do
+# when INPUT comes to a rule that drops everything, or to a drop policy, and
+# no rule above lets the port in. Prints the closed ones as "tcp/443 udp/443".
+#
+# shortcut: IPv4 rules only, and a rule is judged by its text, not by sending
+# packets; add ip6tables when a node is reached over IPv6, and a real probe
+# when a ruleset fools this.
+ipt_closed() {
+  command -v iptables >/dev/null 2>&1 || return 0
+  { iptables -S INPUT || true; iptables -S OBHOD || true; } 2>/dev/null |
+    awk -v tcp="$TCP_PORTS" -v udp="$UDP_PORTS" '
+      function let_in(proto, port,    i) {
+        for (i = 1; i <= n; i++) if (pr[i] == proto && port + 0 >= lo[i] && port + 0 <= hi[i]) return 1
+        return 0
+      }
+      /^-P INPUT DROP/ { policy = 1 }
+      / -j (ACCEPT|DROP|REJECT)/ {
+        rule = $0
+        gsub(/ -m comment --comment ("[^"]*"|[^ ]+)/, "", rule)
+        # The first rule that takes every packet decides. One tied to an
+        # interface counts only as a drop: loopback being open says nothing
+        # about the outside.
+        if (verdict == "" && rule ~ /^-A INPUT -j ACCEPT$/) verdict = "open"
+        if (verdict == "" && rule ~ /^-A INPUT( -i [^ ]+)? -j (DROP|REJECT)( --reject-with [^ ]+)?$/) verdict = "closed"
+      }
+      /^-A INPUT -j OBHOD$/ { jump = 1 }
+      / -j ACCEPT/ && / -p (tcp|udp) / {
+        # A rule of the chain this installer adds opens a port only while
+        # INPUT jumps to that chain; another tool may have taken the jump out.
+        if ($0 ~ /^-A OBHOD / && !jump) next
+        proto = ($0 ~ / -p tcp /) ? "tcp" : "udp"
+        cnt = split($0, f, " ")
+        for (i = 1; i < cnt; i++) if (f[i] == "--dport" || f[i] == "--dports") {
+          m = split(f[i + 1], list, ",")
+          for (j = 1; j <= m; j++) {
+            k = split(list[j], range, ":")
+            n++
+            pr[n] = proto
+            lo[n] = range[1] + 0
+            hi[n] = range[k] + 0
+          }
+        }
+      }
+      END {
+        if (verdict == "" && policy) verdict = "closed"
+        if (verdict != "closed") exit
+        cnt = split(tcp, t, " ")
+        for (i = 1; i <= cnt; i++) if (!let_in("tcp", t[i])) out = out " tcp/" t[i]
+        cnt = split(udp, u, " ")
+        for (i = 1; i <= cnt; i++) if (!let_in("udp", u[i])) out = out " udp/" u[i]
+        print substr(out, 2)
+      }'
+}
+
 # Xray is one static binary and does not care which init starts it: a
 # systemd unit where systemd is the running init, an init script built on
 # start-stop-daemon on older Debian-family hosts.
@@ -82,13 +139,18 @@ svc_log() {
 # whole script before running any of it, so a command that reads stdin cannot
 # swallow the rest of a script that is itself arriving on stdin.
 main() {
-  local mode=install deps=no firewall=no tune=no zip=""
+  local mode=install deps=no firewall=no tune=no zip="" from=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --check) mode=check ;;
       --uninstall) mode=uninstall ;;
       --install-deps) deps=yes ;;
       --open-firewall) firewall=yes ;;
+      --from)
+        [ $# -ge 2 ] || die "--from needs a list of addresses"
+        from="${2//,/ }"
+        shift
+        ;;
       --tune-network) tune=yes ;;
       --xray-zip)
         [ $# -ge 2 ] || die "--xray-zip needs a path"
@@ -123,9 +185,10 @@ main() {
       rm -f "$INITD"
     fi
     rm -f /etc/sysctl.d/99-obhod.conf
+    if [ -x "$PREFIX/bin/firewall" ]; then "$PREFIX/bin/firewall" close || true; fi
     rm -rf "$PREFIX"
     if id "$SVC_USER" >/dev/null 2>&1; then userdel "$SVC_USER" || true; fi
-    say "removed (firewall rules and already applied sysctl values, if any, stay)"
+    say "removed (ufw and firewalld rules and already applied sysctl values, if any, stay)"
     exit 0
   fi
 
@@ -204,6 +267,33 @@ main() {
   elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
     fw=firewalld
   fi
+  # Rules that no manager owns still decide whether the node can be reached.
+  local closed=""
+  if [ "$fw" = none ]; then
+    closed="$(ipt_closed)"
+    # The settings file is what an earlier run with --open-firewall left.
+    if [ -n "$closed" ] || [ -f "$PREFIX/etc/firewall.conf" ]; then fw=iptables; fi
+  fi
+
+  local a ipv4='^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$'
+  if [ -n "$from" ] && [ "$firewall" = no ]; then
+    problems="$problems\n- --from needs --open-firewall"
+  fi
+  for a in $from; do
+    if ! [[ "$a" =~ $ipv4 ]]; then
+      problems="$problems\n- --from $a: not an IPv4 address or network"
+    fi
+  done
+  # shortcut: ufw and firewalld are opened for everyone or not at all; teach
+  # them source addresses when a node behind one of them needs it.
+  if [ -n "$from" ] && { [ "$fw" = ufw ] || [ "$fw" = firewalld ]; }; then
+    problems="$problems\n- --from works only with plain iptables rules, not with $fw: open the ports for these addresses yourself"
+  fi
+  # The service puts its rules back at every start, as root, which a systemd
+  # unit can do for one command only since version 231.
+  if [ "$firewall" = yes ] && [ "$fw" = iptables ] && [ "$INIT" = systemd ] && [ "$sdver" -lt 231 ]; then
+    problems="$problems\n- opening ports in iptables needs systemd 231 or newer on this host: open them yourself"
+  fi
 
   say "node {{.Node}}: kernel $kver, $initdesc, $(uname -m)"
   say "ports: TCP [$TCP_PORTS] UDP [$UDP_PORTS]; firewall manager: $fw"
@@ -214,8 +304,15 @@ main() {
   if [ "$mode" = check ]; then
     say "preflight passed; nothing was changed"
     if [ -n "$need" ]; then say "would install:$need"; fi
-    if [ "$fw" != none ] && [ "$firewall" = no ]; then
+    if [ "$fw" = iptables ] && [ "$firewall" = yes ]; then
+      say "would open the ports in iptables for ${from:-any address}"
+    elif [ -n "$closed" ]; then
+      say "iptables rules close $closed: add --open-firewall or open them yourself"
+    elif [ "$fw" != none ] && [ "$fw" != iptables ] && [ "$firewall" = no ]; then
       say "$fw is active and the ports would stay closed: add --open-firewall or open them yourself"
+    fi
+    if [ -n "$from" ] && [ "$fw" = none ]; then
+      say "found no firewall rule that closes the ports on this host, so --from changes nothing: every address can reach them"
     fi
     exit 0
   fi
@@ -289,6 +386,40 @@ OBHOD_CONFIG_EOF
   fi
   mv "$new" "$PREFIX/etc/config.json"
 
+  # Where the host's own iptables rules close the ports, the node keeps a
+  # helper that lets them through, and its service runs the helper at every
+  # start: a rule added once by hand is gone after a reboot. What an earlier
+  # run set up stays in force until --open-firewall is given again.
+  if [ "$firewall" = yes ] && [ "$fw" = iptables ]; then
+    cat > "$PREFIX/etc/firewall.conf" <<FWCONF_EOF
+TCP='$TCP_PORTS'
+UDP='$UDP_PORTS'
+FROM='$from'
+FWCONF_EOF
+    cat > "$PREFIX/bin/firewall" <<'OBHOD_FIREWALL_EOF'
+#!/bin/sh
+# Lets this node's ports through plain iptables rules: "open" puts the rules
+# in, anything else only takes them out. Whatever an earlier run left is
+# removed first, so running it again does not pile rules up.
+. "${0%/*}/../etc/firewall.conf"
+iptables -D INPUT -j OBHOD 2>/dev/null
+iptables -F OBHOD 2>/dev/null
+iptables -X OBHOD 2>/dev/null
+[ "$1" = open ] || exit 0
+iptables -N OBHOD
+for src in ${FROM:-0.0.0.0/0}; do
+  for p in $TCP; do iptables -A OBHOD -p tcp -s "$src" --dport "$p" -j ACCEPT; done
+  for p in $UDP; do iptables -A OBHOD -p udp -s "$src" --dport "$p" -j ACCEPT; done
+done
+iptables -I INPUT 1 -j OBHOD
+OBHOD_FIREWALL_EOF
+    chmod 0755 "$PREFIX/bin/firewall"
+  fi
+  # "-" keeps a failed helper from stopping the node, "+" runs it as root
+  # outside the restrictions the unit puts on Xray.
+  local fwhook=""
+  if [ -f "$PREFIX/etc/firewall.conf" ]; then fwhook="ExecStartPre=-+$PREFIX/bin/firewall open"; fi
+
   # Without ambient capabilities the node runs on high ports (checked above)
   # and needs no capability at all.
   local caps=""
@@ -306,6 +437,7 @@ Wants=network-online.target
 [Service]
 User=$SVC_USER
 Environment=XRAY_LOCATION_ASSET=$PREFIX/share
+$fwhook
 ExecStart=$PREFIX/bin/xray run -config $PREFIX/etc/config.json
 Restart=on-failure
 RestartSec=5
@@ -340,6 +472,7 @@ UNIT_EOF
 PIDFILE=/var/run/$UNIT.pid
 case "\$1" in
   start)
+    if [ -x $PREFIX/bin/firewall ]; then $PREFIX/bin/firewall open || true; fi
     ulimit -n 65536 2>/dev/null || true
     start-stop-daemon --start --quiet --oknodo --background --make-pidfile --pidfile "\$PIDFILE" \\
       --user $SVC_USER --chuid $SVC_USER --startas /bin/sh -- -c \\
@@ -388,8 +521,15 @@ SYSCTL_EOF
     for p in $UDP_PORTS; do firewall-cmd -q --permanent --add-port="$p/udp"; done
     firewall-cmd -q --reload
     say "opened ports in firewalld"
-  elif [ "$fw" != none ]; then
+  elif [ "$firewall" = yes ] && [ "$fw" = iptables ]; then
+    say "the service opens the ports in iptables for ${from:-any address} at every start"
+  elif [ -n "$closed" ]; then
+    say "iptables rules close $closed and were left alone: open the ports yourself or rerun with --open-firewall"
+  elif [ "$fw" != none ] && [ "$fw" != iptables ]; then
     say "$fw is active and was left alone: open the ports yourself or rerun with --open-firewall"
+  fi
+  if [ -n "$from" ] && [ "$fw" = none ]; then
+    say "found no firewall rule that closes the ports on this host, so --from changes nothing: every address can reach them"
   fi
 
   svc_restart
@@ -402,6 +542,13 @@ SYSCTL_EOF
       die "the new config did not start; the previous config was put back"
     fi
     die "$UNIT did not start; see the log above"
+  fi
+  # The helper's failure does not stop the node, so look at the result.
+  if [ -f "$PREFIX/etc/firewall.conf" ]; then
+    closed="$(ipt_closed)"
+    if [ -n "$closed" ]; then
+      say "warning: iptables rules still close $closed; run $PREFIX/bin/firewall open by hand to see why"
+    fi
   fi
 
   say "node {{.Node}} is up: TCP [$TCP_PORTS] UDP [$UDP_PORTS]"
