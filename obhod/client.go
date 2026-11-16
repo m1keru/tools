@@ -327,14 +327,23 @@ func autoClient(ps []profile) obj {
 		"tag":         "auto",
 		"selector":    tags,
 		"fallbackTag": tags[0],
-		"strategy":    obj{"type": "leastLoad", "settings": obj{"expected": 1, "costs": costs}},
+		// Xray drops a node on its own only when every kept check has failed.
+		// The tolerance takes it out once more than half of them have: two of
+		// the three kept. One failure leaves it in, even with only two
+		// results on record: the first check through a fresh XHTTP connection
+		// is slow and now and then times out on a healthy node, and a single
+		// lost check must not move a user to another exit address.
+		"strategy": obj{"type": "leastLoad", "settings": obj{"expected": 1, "costs": costs, "tolerance": 0.5}},
 	}}
+	// Each node is checked `sampling` times, at random moments, in every
+	// window of interval × sampling. Two checks a minute notice a dead node in
+	// a minute or two and keep a dead node's handshakes under the burst rule.
 	c["burstObservatory"] = obj{
 		"subjectSelector": tags,
 		"pingConfig": obj{
 			"destination": "https://www.gstatic.com/generate_204",
-			"interval":    "1m",
-			"sampling":    4,
+			"interval":    "30s",
+			"sampling":    3,
 			"timeout":     "10s",
 		},
 	}

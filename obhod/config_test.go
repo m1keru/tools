@@ -386,6 +386,44 @@ func TestAutoClientProbesOnlyXHTTP(t *testing.T) {
 	}
 }
 
+// How Xray decides a node is dead (app/observatory/burst, strategy_leastload):
+// every node is checked `sampling` times, at random moments, within each
+// window of interval × sampling, and the last `sampling` results are kept.
+// Left alone, the balancer drops a node only when every kept result is a
+// failure. With four results a minute apart, a silently banned exit held all
+// the traffic: 166 seconds without a switch in a lab run, with a healthy
+// second exit standing by.
+func TestAutoClientDropsDeadNode(t *testing.T) {
+	st := testState(t)
+	c := roundTrip(t, autoClient(profiles(st, st.user("me"))))
+	ping := dig(t, c, "burstObservatory", "pingConfig").(map[string]any)
+	interval, err := time.ParseDuration(ping["interval"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sampling := ping["sampling"].(float64)
+	bal := dig(t, c, "routing", "balancers").([]any)[0].(map[string]any)
+	tolerance, _ := dig(t, bal, "strategy", "settings").(map[string]any)["tolerance"].(float64)
+
+	// Two failed checks among the kept ones take a node out. One does not,
+	// even while only two results exist: the first check through a fresh
+	// XHTTP connection is slow and now and then times out on a healthy node,
+	// and a single lost check must not move a user to another exit address.
+	if tolerance < 0.5 || tolerance >= 2/sampling {
+		t.Errorf("tolerance %v with %v kept results: want one failure of two tolerated, two of %v not", tolerance, sampling, sampling)
+	}
+	// A window is the longest a dead node can go with one check or none.
+	if window := time.Duration(sampling) * interval; window > 2*time.Minute {
+		t.Errorf("checks are spread over %v: too long to notice a dead node", window)
+	}
+	// Every check of a dead node is a fresh TLS handshake, and more than
+	// three a minute to one name set off the burst rule. Real traffic dials
+	// too, so the checks take at most two.
+	if perMinute := float64(time.Minute) / float64(interval); perMinute > 2 {
+		t.Errorf("%.1f checks a minute per node: too close to the burst rule", perMinute)
+	}
+}
+
 func TestSingleClientRouting(t *testing.T) {
 	st := testState(t)
 	for _, p := range profiles(st, st.user("me")) {
