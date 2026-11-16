@@ -14,3 +14,4 @@
 # Local credentials; never commit.
 .passwd
 .cf_api_key
+.yandex-key
