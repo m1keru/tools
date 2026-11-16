@@ -1,16 +1,19 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // testState builds two exits and a relay in front of the first one.
@@ -626,6 +629,94 @@ func TestRekeyReplacesEverySecret(t *testing.T) {
 	}
 	if n.Address != before.Address || n.Reality.Target != before.Reality.Target {
 		t.Error("rekey must not move the node")
+	}
+}
+
+// tlsSite runs a TLS server on loopback, set up the way some would-be target
+// site is, and returns its address.
+func tlsSite(t *testing.T, tune func(*tls.Config)) string {
+	t.Helper()
+	certPEM, keyPEM, _, err := newSelfSignedCert("target.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}}
+	tune(conf)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				c.(*tls.Conn).Handshake()
+				c.Close()
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// A site that answers `curl --tlsv1.3 --http2` can still be useless as a
+// REALITY target: an exit put behind one that takes only the P-256 key
+// exchange failed every client with "invalid server key share".
+func TestTargetProblem(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		tune func(*tls.Config)
+		want string // a part of the problem; empty means the site fits
+	}{
+		{"TLS 1.3, X25519, HTTP/2", func(*tls.Config) {}, ""},
+		{"P-256 key exchange only", func(c *tls.Config) { c.CurvePreferences = []tls.CurveID{tls.CurveP256} }, "X25519"},
+		{"no TLS 1.3", func(c *tls.Config) { c.MaxVersion = tls.VersionTLS12 }, "TLS 1.3"},
+		{"no HTTP/2", func(c *tls.Config) { c.NextProtos = []string{"http/1.1"} }, "HTTP/2"},
+	} {
+		got := targetProblem(tlsSite(t, c.tune), "target.test", 5*time.Second)
+		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
+			t.Errorf("%s: problem = %q, want one about %q", c.name, got, c.want)
+		}
+	}
+
+	// An unreachable site says nothing about the site: the machine running
+	// obhod may simply sit in a network that cannot see it.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	free := ln.Addr().String()
+	ln.Close()
+
+	// A connection cut off mid-handshake is what a censor's filter looks like
+	// from inside its network. It must not be blamed on the site.
+	cut, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cut.Close() })
+	go func() {
+		for {
+			c, err := cut.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	if got := targetProblem(cut.Addr().String(), "target.test", 5*time.Second); !strings.Contains(got, "не удалось проверить") {
+		t.Errorf("connection cut off: problem = %q, want it to say the check could not be made", got)
+	}
+
+	if got := targetProblem(free, "target.test", 5*time.Second); !strings.Contains(got, "не удалось проверить") {
+		t.Errorf("nothing listening: problem = %q, want it to say the check could not be made", got)
 	}
 }
 

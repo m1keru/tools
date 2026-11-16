@@ -290,6 +290,9 @@ func warnTarget(n *Node) {
 	for _, w := range targetWarnings(n.Reality.ServerName) {
 		fmt.Fprintf(os.Stderr, "предупреждение (%s): %s\n", n.Name, w)
 	}
+	if w := targetProblem(n.Reality.Target, n.Reality.ServerName, 8*time.Second); w != "" {
+		fmt.Fprintf(os.Stderr, "предупреждение (%s): %s\n", n.Name, w)
+	}
 }
 
 func cmdSet(args []string) error {

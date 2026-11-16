@@ -1,13 +1,16 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const (
@@ -289,6 +292,40 @@ var (
 	sniTells   = []string{"vpn", "proxy", "node", "xray", "reality", "vless", "tunnel"}
 	sniCrowded = []string{"google", "microsoft", "apple", "cloudflare", "amazon"}
 )
+
+// targetProblem asks the target site itself whether REALITY can stand behind
+// it, and returns "" when it can. REALITY borrows the site's TLS 1.3 handshake
+// and knows only the X25519 key exchange. A site that insists on another one
+// answers `curl --tlsv1.3 --http2` and still fails every client with "invalid
+// server key share".
+func targetProblem(target, serverName string, timeout time.Duration) string {
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: timeout}, "tcp", target, &tls.Config{
+		ServerName:       serverName,
+		MinVersion:       tls.VersionTLS13,
+		CurvePreferences: []tls.CurveID{tls.X25519},
+		NextProtos:       []string{"h2", "http/1.1"},
+		// Only what the site is able to do is read here: nothing is sent to
+		// it and nothing it sends is trusted.
+		InsecureSkipVerify: true,
+	})
+	// Only a TLS alert, or a handshake the site completed differently, is the
+	// site's own answer. A refused, reset, cut off or silent connection may
+	// just as well be a filter between this machine and the site.
+	var op *net.OpError
+	var ne net.Error
+	switch {
+	case errors.As(err, &op) && op.Op != "remote error", errors.As(err, &ne) && ne.Timeout(),
+		errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return fmt.Sprintf("сайт-цель не удалось проверить с этой машины (%v): проверьте его с сервера", err)
+	case err != nil:
+		return fmt.Sprintf("сайт-цель не принимает TLS 1.3 с обменом ключами X25519 (%v): REALITY с ним не заработает", err)
+	}
+	defer conn.Close()
+	if conn.ConnectionState().NegotiatedProtocol != "h2" {
+		return "сайт-цель не отвечает по HTTP/2"
+	}
+	return ""
+}
 
 // targetWarnings flags REALITY targets that are likely to be a liability.
 func targetWarnings(serverName string) []string {
