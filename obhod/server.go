@@ -109,9 +109,27 @@ func serverConfig(st *State, n *Node) obj {
 		obj{"protocol": []string{"bittorrent"}, "outboundTag": "block"},
 	}
 	outbounds := []any{direct, block}
-	if n.IsRelay() {
-		up := st.node(n.Upstream)
-		outbounds = []any{xhttpOutbound("upstream", up, n.LinkUUID, st.Fingerprint), direct, block}
+	var balancer, checks obj
+	switch ups := n.upstreams(); {
+	case len(ups) == 1:
+		// The first outbound takes whatever no rule claims.
+		outbounds = []any{xhttpOutbound("upstream", st.node(ups[0]), n.LinkUUID, st.Fingerprint), direct, block}
+	case len(ups) > 1:
+		// The exit's name comes first in the tag: balancers match tags by
+		// prefix, and names cannot prefix one another once a dash follows.
+		var tags []string
+		var costs []any
+		outbounds = nil
+		cost := 1.0
+		for _, name := range ups {
+			tag := name + "-up"
+			outbounds = append(outbounds, xhttpOutbound(tag, st.node(name), n.LinkUUID, st.Fingerprint))
+			tags = append(tags, tag)
+			costs = append(costs, obj{"match": tag, "value": cost})
+			cost *= 100
+		}
+		outbounds = append(outbounds, direct, block)
+		balancer, checks = failover("upstream", tags, costs)
 	}
 	switch {
 	case !n.AllowRU:
@@ -125,11 +143,18 @@ func serverConfig(st *State, n *Node) obj {
 			obj{"ip": []string{"geoip:ru"}, "outboundTag": "direct"})
 	}
 
-	return obj{
+	routing := obj{"domainStrategy": "AsIs", "rules": rules}
+	c := obj{
 		// No access log: the server keeps no record of who went where.
 		"log":       obj{"loglevel": "warning", "access": "none"},
 		"inbounds":  inbounds,
 		"outbounds": outbounds,
-		"routing":   obj{"domainStrategy": "AsIs", "rules": rules},
+		"routing":   routing,
 	}
+	if balancer != nil {
+		routing["rules"] = append(rules, obj{"network": "tcp,udp", "balancerTag": balancer["tag"]})
+		routing["balancers"] = []any{balancer}
+		c["burstObservatory"] = checks
+	}
+	return c
 }

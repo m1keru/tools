@@ -335,8 +335,18 @@ func autoClient(ps []profile) obj {
 	}
 	rules := append(splitRules(), obj{"network": "tcp,udp", "balancerTag": "auto"})
 	c := baseClient(auto[0].User, proxies, rules)
-	c["routing"].(obj)["balancers"] = []any{obj{
-		"tag":         "auto",
+	balancer, checks := failover("auto", tags, costs)
+	c["routing"].(obj)["balancers"] = []any{balancer}
+	c["burstObservatory"] = checks
+	return c
+}
+
+// failover builds a balancer that keeps traffic on the cheapest outbound that
+// answers, and the health checks it decides by. Clients use it to pick a node
+// and relays to pick an exit, so both leave a dead one by the same rule.
+func failover(tag string, tags []string, costs []any) (balancer, checks obj) {
+	balancer = obj{
+		"tag":         tag,
 		"selector":    tags,
 		"fallbackTag": tags[0],
 		// Xray drops a node on its own only when every kept check has failed.
@@ -346,11 +356,11 @@ func autoClient(ps []profile) obj {
 		// is slow and now and then times out on a healthy node, and a single
 		// lost check must not move a user to another exit address.
 		"strategy": obj{"type": "leastLoad", "settings": obj{"expected": 1, "costs": costs, "tolerance": 0.5}},
-	}}
+	}
 	// Each node is checked `sampling` times, at random moments, in every
 	// window of interval × sampling. Two checks a minute notice a dead node in
 	// a minute or two and keep a dead node's handshakes under the burst rule.
-	c["burstObservatory"] = obj{
+	checks = obj{
 		"subjectSelector": tags,
 		"pingConfig": obj{
 			"destination": "https://www.gstatic.com/generate_204",
@@ -359,5 +369,5 @@ func autoClient(ps []profile) obj {
 			"timeout":     "10s",
 		},
 	}
-	return c
+	return balancer, checks
 }

@@ -277,6 +277,111 @@ func TestRelayServerConfig(t *testing.T) {
 	}
 }
 
+// A relay with several exits moves to a live one by itself. A client pinned to
+// the relay, a phone as much as a computer, then has nothing to do when an
+// exit is banned.
+func TestRelayPicksAmongSeveralExits(t *testing.T) {
+	st := testState(t)
+	ru, nl, fi := st.node("ru1"), st.node("nl1"), st.node("fi1")
+	ru.Upstream = "nl1,fi1"
+	if err := st.validate(); err != nil {
+		t.Fatal(err)
+	}
+	c := roundTrip(t, serverConfig(st, ru))
+
+	for _, want := range []struct {
+		tag  string
+		exit *Node
+	}{{"nl1-up", nl}, {"fi1-up", fi}} {
+		o := find(t, c["outbounds"], want.tag)
+		if o == nil {
+			t.Fatalf("relay has no outbound %s", want.tag)
+		}
+		if dig(t, o, "settings", "address") != want.exit.Address || dig(t, o, "settings", "id") != ru.LinkUUID ||
+			dig(t, o, "streamSettings", "realitySettings", "password") != want.exit.Reality.PublicKey {
+			t.Errorf("%s does not lead to %s under the relay's own identity", want.tag, want.exit.Name)
+		}
+	}
+
+	bal := dig(t, c, "routing", "balancers").([]any)[0].(map[string]any)
+	if got := fmt.Sprint(bal["selector"]); got != "[nl1-up fi1-up]" {
+		t.Errorf("balancer picks among %s, want the exits in the order given", got)
+	}
+	if bal["fallbackTag"] != "nl1-up" {
+		t.Errorf("fallback = %v, want the first exit", bal["fallbackTag"])
+	}
+	costs := dig(t, bal, "strategy", "settings", "costs").([]any)
+	if len(costs) != 2 || costs[0].(map[string]any)["value"].(float64) >= costs[1].(map[string]any)["value"].(float64) {
+		t.Errorf("costs = %v, want the first exit preferred", costs)
+	}
+	rules := dig(t, c, "routing", "rules").([]any)
+	if last := rules[len(rules)-1].(map[string]any); last["balancerTag"] != bal["tag"] {
+		t.Errorf("last rule = %v, want everything left sent to the balancer", last)
+	}
+	if !routes(c, "geoip:ru", "block") {
+		t.Error("Russian destinations must be refused before the balancer sees them")
+	}
+
+	// The relay notices a dead exit the way a client notices a dead node.
+	auto := roundTrip(t, autoClient(profiles(st, st.user("me"))))
+	clientBal := dig(t, auto, "routing", "balancers").([]any)[0].(map[string]any)
+	if dig(t, bal, "strategy", "settings").(map[string]any)["tolerance"] != dig(t, clientBal, "strategy", "settings").(map[string]any)["tolerance"] ||
+		!reflect.DeepEqual(dig(t, c, "burstObservatory", "pingConfig"), dig(t, auto, "burstObservatory", "pingConfig")) {
+		t.Error("relay and client must check nodes and drop them by the same rule")
+	}
+	if got := fmt.Sprint(dig(t, c, "burstObservatory", "subjectSelector")); got != "[nl1-up fi1-up]" {
+		t.Errorf("health checks cover %s, want both exits", got)
+	}
+
+	// Every exit on the list lets the relay in.
+	for _, exit := range []*Node{nl, fi} {
+		x := find(t, roundTrip(t, serverConfig(st, exit))["inbounds"], kindXHTTP)
+		known := false
+		for _, u := range dig(t, x, "settings", "users").([]any) {
+			known = known || u.(map[string]any)["id"] == ru.LinkUUID
+		}
+		if !known {
+			t.Errorf("exit %s does not know the relay", exit.Name)
+		}
+	}
+}
+
+// Changing a relay's exits must not touch its keys: clients keep the profiles
+// they have, which is the point of doing it without removing the relay.
+func TestRotateUpstreamKeepsRelayKeys(t *testing.T) {
+	st := testState(t)
+	path := filepath.Join(t.TempDir(), "obhod.json")
+	if err := st.save(path); err != nil {
+		t.Fatal(err)
+	}
+	before := *st.node("ru1")
+
+	if err := run([]string{"node", "rotate", "-state", path, "-name", "ru1", "-upstream", "fi1,nl1"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := got.node("ru1")
+	if after.Upstream != "fi1,nl1" {
+		t.Errorf("upstream = %q, want fi1,nl1", after.Upstream)
+	}
+	if after.LinkUUID != before.LinkUUID || after.Reality != before.Reality || after.XHTTP != before.XHTTP {
+		t.Error("the relay's keys changed")
+	}
+
+	// An exit turned into a relay would leave clients with profiles for a
+	// node that no longer exits anywhere.
+	err = run([]string{"node", "rotate", "-state", path, "-name", "nl1", "-upstream", "fi1"})
+	if err == nil || !strings.Contains(err.Error(), "is an exit") {
+		t.Errorf("exit given an upstream: err = %v", err)
+	}
+	if err := run([]string{"node", "rotate", "-state", path, "-name", "ru1", "-upstream", "fi1,gone"}); err == nil {
+		t.Error("an upstream that does not exist was accepted")
+	}
+}
+
 // The burst rule freezes a client that opens more than three TLS handshakes
 // to one name within a minute, so XHTTP must stay within that many
 // connections. Xray also refuses maxConnections together with maxConcurrency.
@@ -629,14 +734,17 @@ func TestIPv6AddressInLink(t *testing.T) {
 
 func TestStateValidation(t *testing.T) {
 	bad := map[string]func(*State){
-		"relay of a relay": func(s *State) { s.node("nl1").Upstream = "fi1"; s.node("fi1").Upstream = "nl1" },
-		"missing upstream": func(s *State) { s.node("ru1").Upstream = "gone" },
-		"duplicate node":   func(s *State) { s.node("fi1").Name = "nl1" },
-		"name with dash":   func(s *State) { s.node("fi1").Name = "fi-1" },
-		"shared tcp port":  func(s *State) { s.node("fi1").Vision.Port = 443 },
-		"nothing enabled":  func(s *State) { n := s.node("fi1"); n.XHTTP.Port, n.Vision.Port, n.Hy2.Port = 0, 0, 0 },
-		"relay link gone":  func(s *State) { s.node("nl1").XHTTP.Port = 0 },
-		"target no port":   func(s *State) { s.node("fi1").Reality.Target = "cdn.example.net" },
+		"relay of a relay":             func(s *State) { s.node("nl1").Upstream = "fi1"; s.node("fi1").Upstream = "nl1" },
+		"missing upstream":             func(s *State) { s.node("ru1").Upstream = "gone" },
+		"one of the upstreams missing": func(s *State) { s.node("ru1").Upstream = "nl1,gone" },
+		"upstream listed twice":        func(s *State) { s.node("ru1").Upstream = "nl1,nl1" },
+		"empty name among upstreams":   func(s *State) { s.node("ru1").Upstream = "nl1," },
+		"duplicate node":               func(s *State) { s.node("fi1").Name = "nl1" },
+		"name with dash":               func(s *State) { s.node("fi1").Name = "fi-1" },
+		"shared tcp port":              func(s *State) { s.node("fi1").Vision.Port = 443 },
+		"nothing enabled":              func(s *State) { n := s.node("fi1"); n.XHTTP.Port, n.Vision.Port, n.Hy2.Port = 0, 0, 0 },
+		"relay link gone":              func(s *State) { s.node("nl1").XHTTP.Port = 0 },
+		"target no port":               func(s *State) { s.node("fi1").Reality.Target = "cdn.example.net" },
 	}
 	for name, mutate := range bad {
 		st := testState(t)

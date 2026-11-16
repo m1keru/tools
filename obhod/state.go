@@ -37,7 +37,9 @@ type User struct {
 
 // Node is one server. With Upstream empty it is an exit: traffic leaves to the
 // internet from it. With Upstream set it is a relay: an entry point that hands
-// everything except Russian destinations to the named exit.
+// everything except Russian destinations to an exit. Upstream names one exit
+// or several, comma-separated in order of preference; with several the relay
+// keeps to the first one that answers.
 type Node struct {
 	Name     string  `json:"name"`
 	Address  string  `json:"address"`
@@ -79,6 +81,14 @@ type Hy2 struct {
 }
 
 func (n *Node) IsRelay() bool { return n.Upstream != "" }
+
+// upstreams lists the exits a relay forwards to, in order of preference.
+func (n *Node) upstreams() []string {
+	if n.Upstream == "" {
+		return nil
+	}
+	return strings.Split(n.Upstream, ",")
+}
 
 // Names become outbound tags; Xray balancers match tags by prefix, so names
 // are kept to plain alphanumerics to rule out one tag prefixing another.
@@ -150,8 +160,10 @@ func (st *State) user(name string) *User {
 func (st *State) relaysOf(exit string) []*Node {
 	var out []*Node
 	for _, n := range st.Nodes {
-		if n.Upstream == exit {
-			out = append(out, n)
+		for _, up := range n.upstreams() {
+			if up == exit {
+				out = append(out, n)
+			}
 		}
 	}
 	return out
@@ -195,17 +207,20 @@ func (st *State) validate() error {
 		}
 	}
 	for _, n := range st.Nodes {
-		if !n.IsRelay() {
-			continue
-		}
-		up := st.node(n.Upstream)
-		switch {
-		case up == nil:
-			return fmt.Errorf("relay %s: upstream %q does not exist", n.Name, n.Upstream)
-		case up.IsRelay():
-			return fmt.Errorf("relay %s: upstream %q is itself a relay; chain relays to an exit", n.Name, n.Upstream)
-		case up.XHTTP.Port == 0:
-			return fmt.Errorf("relay %s: upstream %q has xhttp disabled, and the relay link uses it", n.Name, n.Upstream)
+		listed := map[string]bool{}
+		for _, name := range n.upstreams() {
+			up := st.node(name)
+			switch {
+			case up == nil:
+				return fmt.Errorf("relay %s: upstream %q does not exist", n.Name, name)
+			case up.IsRelay():
+				return fmt.Errorf("relay %s: upstream %q is itself a relay; chain relays to an exit", n.Name, name)
+			case up.XHTTP.Port == 0:
+				return fmt.Errorf("relay %s: upstream %q has xhttp disabled, and the relay link uses it", n.Name, name)
+			case listed[name]:
+				return fmt.Errorf("relay %s: upstream %q is listed twice", n.Name, name)
+			}
+			listed[name] = true
 		}
 	}
 	return nil

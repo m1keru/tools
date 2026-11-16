@@ -17,10 +17,10 @@ const usage = `obhod: несколько независимых транспор
 
   obhod init                         создать состояние (obhod.json) с пользователем "me"
   obhod user add ИМЯ | rm ИМЯ        добавить или отозвать пользователя
-  obhod node add -name N -addr IP -target САЙТ:443 [-upstream EXIT] ...
+  obhod node add -name N -addr IP -target САЙТ:443 [-upstream EXIT[,EXIT]] ...
                                      добавить выходной узел, а с -upstream: relay перед ним
-  obhod node rotate -name N [-addr IP] [-target САЙТ:443] [-rekey]
-                                     сменить адрес, сайт-цель или все ключи узла
+  obhod node rotate -name N [-addr IP] [-target САЙТ:443] [-upstream EXIT[,EXIT]] [-rekey]
+                                     сменить адрес, сайт-цель, выходы relay или все ключи узла
   obhod node rm ИМЯ                  удалить узел
   obhod set [-fp F] [-xray V]        отпечаток TLS клиентов, версия Xray на серверах
   obhod show                         узлы и пользователи, без секретов
@@ -159,7 +159,7 @@ func cmdNode(args []string) error {
 		fs.StringVar(&o.Address, "addr", "", "IP или домен, по которому узел видят клиенты")
 		fs.StringVar(&o.Target, "target", "", "сайт-цель REALITY, host:443")
 		fs.StringVar(&o.ServerName, "sni", "", "имя сервера, если отличается от хоста в -target")
-		fs.StringVar(&o.Upstream, "upstream", "", "имя выходного узла: делает этот узел relay")
+		fs.StringVar(&o.Upstream, "upstream", "", "выходные узлы через запятую, по порядку предпочтения: делает этот узел relay")
 		fs.IntVar(&o.XHTTPPort, "xhttp-port", 443, "TCP-порт XHTTP+REALITY, 0 отключает")
 		fs.IntVar(&o.VisionPort, "vision-port", 8443, "TCP-порт Vision+REALITY, 0 отключает")
 		fs.IntVar(&o.Hy2Port, "hy2-port", 443, "UDP-порт Hysteria2, 0 отключает")
@@ -188,7 +188,7 @@ func cmdNode(args []string) error {
 		warnTarget(n)
 		fmt.Printf("узел %s добавлен. Дальше: obhod render, затем install.sh на сервере.\n", n.Name)
 		if n.IsRelay() {
-			fmt.Printf("Relay получает свою учётную запись на %s: переустановите и %s.\n", n.Upstream, n.Upstream)
+			fmt.Printf("Relay получает свою учётную запись на выходах %s: переустановите и их.\n", n.Upstream)
 		}
 		return nil
 
@@ -198,6 +198,7 @@ func cmdNode(args []string) error {
 		addr := fs.String("addr", "", "новый адрес")
 		target := fs.String("target", "", "новый сайт-цель REALITY, host:443")
 		sni := fs.String("sni", "", "новое имя сервера")
+		upstream := fs.String("upstream", "", "новые выходы relay через запятую, по порядку предпочтения")
 		rekey := fs.Bool("rekey", false, "заменить все ключи, пути и пароли узла")
 		if err := fs.Parse(rest); err != nil {
 			return err
@@ -210,8 +211,16 @@ func cmdNode(args []string) error {
 		if n == nil {
 			return fmt.Errorf("no node %q", *name)
 		}
-		if *addr == "" && *target == "" && *sni == "" && !*rekey {
-			return errors.New("node rotate: nothing to change; give -addr, -target, -sni or -rekey")
+		if *addr == "" && *target == "" && *sni == "" && *upstream == "" && !*rekey {
+			return errors.New("node rotate: nothing to change; give -addr, -target, -sni, -upstream or -rekey")
+		}
+		if *upstream != "" {
+			// Turning an exit into a relay would leave its clients with
+			// profiles for a node that no longer exits anywhere.
+			if !n.IsRelay() {
+				return fmt.Errorf("node %s is an exit: -upstream changes the exits of a relay", n.Name)
+			}
+			n.Upstream = *upstream
 		}
 		if *addr != "" {
 			n.Address = *addr
@@ -240,7 +249,18 @@ func cmdNode(args []string) error {
 		if err := st.save(*path); err != nil {
 			return err
 		}
-		warnTarget(n)
+		// The target is asked over the network; only do that when it changed.
+		if *target != "" || *sni != "" {
+			warnTarget(n)
+		}
+		if *upstream != "" {
+			fmt.Printf("relay %s теперь ходит на выходы %s. Переустановите relay и каждый выход, который добавили или убрали.\n", n.Name, n.Upstream)
+		}
+		if *addr == "" && *target == "" && *sni == "" && !*rekey {
+			// Only the relay's exits changed: what clients hold stays valid.
+			fmt.Println("Выполните obhod render. Клиентам менять нечего.")
+			return nil
+		}
 		fmt.Printf("узел %s изменён. Выполните obhod render, переустановите узел и раздайте клиентам новые ссылки.\n", n.Name)
 		if rs := st.relaysOf(n.Name); len(rs) > 0 {
 			var names []string
