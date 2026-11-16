@@ -64,6 +64,7 @@ func installScript(st *State, n *Node) ([]byte, error) {
 //	clients/<user>/sub.txt           the same links as a base64 subscription
 //	clients/<user>/proxy.txt         where the desktop configs listen, with the password
 //	clients/<user>/xray/auto.json    desktop config with failover (2+ XHTTP profiles)
+//	clients/<user>/xray/mobile.json  the same for a phone app: no local proxy
 //	clients/<user>/xray/<tag>.json   desktop config pinned to one profile
 func render(st *State, dir string) ([]string, error) {
 	if len(st.Nodes) == 0 {
@@ -131,6 +132,12 @@ func render(st *State, dir string) ([]string, error) {
 				return nil, err
 			}
 			if err := write(filepath.Join(base, "xray", "auto.json"), cfg); err != nil {
+				return nil, err
+			}
+			if cfg, err = marshal(mobileClient(ps)); err != nil {
+				return nil, err
+			}
+			if err := write(filepath.Join(base, "xray", "mobile.json"), cfg); err != nil {
 				return nil, err
 			}
 		}

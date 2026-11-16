@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -421,6 +422,29 @@ func TestAutoClientDropsDeadNode(t *testing.T) {
 	// too, so the checks take at most two.
 	if perMinute := float64(time.Minute) / float64(interval); perMinute > 2 {
 		t.Errorf("%.1f checks a minute per node: too close to the burst rule", perMinute)
+	}
+}
+
+// A phone app brings the tunnel interface itself: v2rayNG adds one to a config
+// it imports. A local proxy port there would only be a way for other apps to
+// find the tunnel, so the phone config listens on nothing. In everything else
+// it is the config a computer fails over with.
+func TestMobileClientOpensNoLocalPort(t *testing.T) {
+	st := testState(t)
+	ps := profiles(st, st.user("me"))
+	auto, phone := roundTrip(t, autoClient(ps)), roundTrip(t, mobileClient(ps))
+	if in, ok := phone["inbounds"].([]any); !ok || len(in) != 0 {
+		t.Errorf("phone config inbounds = %v, want an empty list", phone["inbounds"])
+	}
+	delete(auto, "inbounds")
+	delete(phone, "inbounds")
+	if !reflect.DeepEqual(auto, phone) {
+		t.Error("the phone must pick nodes exactly as the computer does")
+	}
+
+	st.Nodes = st.Nodes[:1]
+	if c := mobileClient(profiles(st, st.user("me"))); c != nil {
+		t.Error("with one xhttp profile there is nothing to fail over to: the phone imports the link")
 	}
 }
 
@@ -873,8 +897,8 @@ func TestRenderWritesPrivateFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 3 installers; per user: 8 pinned configs, links, subscription, auto,
-	// local proxy addresses.
-	if want := 3 + 2*(8+4); len(files) != want {
+	// the phone config, local proxy addresses.
+	if want := 3 + 2*(8+5); len(files) != want {
 		t.Errorf("rendered %d files, want %d", len(files), want)
 	}
 	for _, f := range files {

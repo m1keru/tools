@@ -279,6 +279,18 @@ func singleClient(p profile) obj {
 	return baseClient(p.User, []any{p.Outbound}, rules)
 }
 
+// mobileClient is autoClient for a phone: the same nodes, health checks and
+// routing, and nothing listening. The app brings the tunnel interface itself
+// (v2rayNG adds a tun inbound to a config it imports), and a local proxy port
+// on a phone would only help other apps find the tunnel.
+func mobileClient(ps []profile) obj {
+	c := autoClient(ps)
+	if c != nil {
+		c["inbounds"] = []any{}
+	}
+	return c
+}
+
 // autoProfiles picks the profiles that are safe to health-check in the
 // background: XHTTP only. Its probes ride the existing multiplexed connection
 // and cost no TLS handshake. Vision opens a handshake per connection, which
