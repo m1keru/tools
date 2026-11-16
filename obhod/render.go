@@ -62,6 +62,7 @@ func installScript(st *State, n *Node) ([]byte, error) {
 //	nodes/<node>/install.sh          run on the server
 //	clients/<user>/links.txt         share links, one per line
 //	clients/<user>/sub.txt           the same links as a base64 subscription
+//	clients/<user>/proxy.txt         where the desktop configs listen, with the password
 //	clients/<user>/xray/auto.json    desktop config with failover (2+ XHTTP profiles)
 //	clients/<user>/xray/<tag>.json   desktop config pinned to one profile
 func render(st *State, dir string) ([]string, error) {
@@ -114,6 +115,14 @@ func render(st *State, dir string) ([]string, error) {
 			return nil, err
 		}
 		if err := write(filepath.Join(base, "sub.txt"), []byte(subscription(ps)+"\n")); err != nil {
+			return nil, err
+		}
+		// The name is checked letters and digits and the password is hex, so
+		// neither needs escaping inside a URL.
+		pass, socksPort, httpPort := u.localProxy()
+		at := u.Name + ":" + pass + "@127.0.0.1"
+		proxy := fmt.Sprintf("socks5h://%s:%d\nhttp://%s:%d\n", at, socksPort, at, httpPort)
+		if err := write(filepath.Join(base, "proxy.txt"), []byte(proxy)); err != nil {
 			return nil, err
 		}
 		if auto := autoClient(ps); auto != nil {

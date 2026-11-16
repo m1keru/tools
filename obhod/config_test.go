@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
@@ -256,8 +257,19 @@ func TestRelayServerConfig(t *testing.T) {
 	if dig(t, up, "streamSettings", "network") != "xhttp" {
 		t.Error("the relay link must be xhttp")
 	}
+	// A Russian service the relay fetched a page from would see the relay's
+	// own address, the one clients connect to.
+	if !routes(c, "geoip:ru", "block") || !routes(c, "geosite:category-ru", "block") {
+		t.Error("relay must refuse Russian destinations by default")
+	}
+
+	ru.AllowRU = true
+	c = roundTrip(t, serverConfig(st, ru))
 	if !routes(c, "geoip:ru", "direct") || !routes(c, "geosite:category-ru", "direct") {
-		t.Error("relay must serve Russian destinations itself")
+		t.Error("with allow_ru the relay must serve Russian destinations itself")
+	}
+	if routes(c, "geoip:ru", "block") {
+		t.Error("allow_ru must lift the block on the relay")
 	}
 }
 
@@ -382,11 +394,99 @@ func TestSingleClientRouting(t *testing.T) {
 		if !routes(c, "geoip:private", "direct") {
 			t.Errorf("%s: LAN must stay direct", p.Tag)
 		}
-		// On a whitelist-only network a direct connection to a Russian site
-		// that is not on the list fails; the relay reaches it from inside.
+		// A Russian service reached through a node learns the node's address.
+		if !routes(c, "geoip:ru", "direct") || !routes(c, "geosite:category-ru", "direct") {
+			t.Errorf("%s: Russian destinations must go direct", p.Tag)
+		}
+	}
+}
+
+// On a whitelist-only network a direct connection to a Russian site that is
+// not on the list fails. A relay marked allow_ru reaches it from inside, so
+// the configs pinned to that relay send it everything.
+func TestSingleClientRoutingThroughRelayThatServesRussia(t *testing.T) {
+	st := testState(t)
+	st.node("ru1").AllowRU = true
+	for _, p := range profiles(st, st.user("me")) {
+		c := roundTrip(t, singleClient(p))
 		if got, want := routes(c, "geoip:ru", "direct"), !p.Node.IsRelay(); got != want {
 			t.Errorf("%s: Russian destinations direct = %v, want %v", p.Tag, got, want)
 		}
+		if !routes(c, "geoip:private", "direct") {
+			t.Errorf("%s: LAN must stay direct", p.Tag)
+		}
+	}
+}
+
+// clientConfigs returns every desktop config rendered for the user, by name.
+func clientConfigs(t *testing.T, st *State, user string) map[string]map[string]any {
+	t.Helper()
+	ps := profiles(st, st.user(user))
+	out := map[string]map[string]any{"auto": roundTrip(t, autoClient(ps))}
+	for _, p := range ps {
+		out[p.Tag] = roundTrip(t, singleClient(p))
+	}
+	return out
+}
+
+// Any program on the machine can connect to 127.0.0.1. Through an open local
+// proxy it sends one request and learns the address the tunnel exits from.
+func TestLocalProxyNeedsPassword(t *testing.T) {
+	st := testState(t)
+	pass := map[string]string{}
+	for _, user := range []string{"me", "anna"} {
+		for name, c := range clientConfigs(t, st, user) {
+			for _, in := range c["inbounds"].([]any) {
+				im := in.(map[string]any)
+				where := name + "/" + im["tag"].(string)
+				if im["listen"] != "127.0.0.1" {
+					t.Errorf("%s listens on %v", where, im["listen"])
+				}
+				set, _ := im["settings"].(map[string]any)
+				accounts, _ := set["accounts"].([]any)
+				if len(accounts) != 1 {
+					t.Errorf("%s: accounts = %v, want exactly one", where, accounts)
+					continue
+				}
+				a := accounts[0].(map[string]any)
+				p, _ := a["pass"].(string)
+				if a["user"] != user || len(p) < 16 {
+					t.Errorf("%s: account %v, want user %q and a long password", where, a, user)
+				}
+				// Xray's SOCKS inbound ignores accounts unless auth says so.
+				if im["protocol"] == "socks" && set["auth"] != "password" {
+					t.Errorf("%s: auth = %v, want password", where, set["auth"])
+				}
+				pass[user] = p
+			}
+		}
+	}
+	if pass["me"] == pass["anna"] {
+		t.Errorf("two users share the local proxy password %q", pass["me"])
+	}
+}
+
+// A program looking for a tunnel tries Xray's stock ports first. And a port
+// the OS hands out for outgoing connections is now and then already taken.
+func TestLocalProxyPortsAreNotStock(t *testing.T) {
+	st := testState(t)
+	seen := map[string]float64{}
+	for name, c := range clientConfigs(t, st, "me") {
+		for _, in := range c["inbounds"].([]any) {
+			im := in.(map[string]any)
+			tag, port := im["tag"].(string), im["port"].(float64)
+			if port == 10808 || port == 10809 || port < 1024 || port >= 32768 {
+				t.Errorf("%s/%s listens on port %v", name, tag, port)
+			}
+			// One address per user, whichever config is running.
+			if p, ok := seen[tag]; ok && p != port {
+				t.Errorf("%s/%s listens on port %v, another config on %v", name, tag, port, p)
+			}
+			seen[tag] = port
+		}
+	}
+	if seen["socks"] == seen["http"] {
+		t.Errorf("socks and http share port %v", seen["socks"])
 	}
 }
 
@@ -596,6 +696,46 @@ func TestInstallScript(t *testing.T) {
 	}
 }
 
+// proxy.txt is where a person looks up what to type into a browser, so it has
+// to name the address and the password the configs really listen with.
+func TestRenderWritesLocalProxyAddresses(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := render(testState(t), dir); err != nil {
+		t.Fatal(err)
+	}
+	client := filepath.Join(dir, "clients", "anna")
+	txt, err := os.ReadFile(filepath.Join(client, "proxy.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(client, "xray", "fi1-vision.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Fields(string(txt))
+	if len(lines) != 2 {
+		t.Fatalf("proxy.txt has %d lines, want socks and http:\n%s", len(lines), txt)
+	}
+	// socks5h, not socks5: the name is resolved by the tunnel, not the local network.
+	for i, want := range []struct{ scheme, inbound string }{{"socks5h", "socks"}, {"http", "http"}} {
+		u, err := url.Parse(lines[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		in := find(t, cfg["inbounds"], want.inbound)
+		account := dig(t, in, "settings", "accounts").([]any)[0].(map[string]any)
+		pass, _ := u.User.Password()
+		if u.Scheme != want.scheme || u.Host != fmt.Sprintf("127.0.0.1:%v", in["port"]) ||
+			u.User.Username() != account["user"] || pass != account["pass"] {
+			t.Errorf("proxy.txt says %s, the config listens on port %v as %v", lines[i], in["port"], account)
+		}
+	}
+}
+
 func TestRenderWritesPrivateFiles(t *testing.T) {
 	st := testState(t)
 	dir := t.TempDir()
@@ -603,8 +743,9 @@ func TestRenderWritesPrivateFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 3 installers; per user: 8 pinned configs, links, subscription, auto.
-	if want := 3 + 2*(8+3); len(files) != want {
+	// 3 installers; per user: 8 pinned configs, links, subscription, auto,
+	// local proxy addresses.
+	if want := 3 + 2*(8+4); len(files) != want {
 		t.Errorf("rendered %d files, want %d", len(files), want)
 	}
 	for _, f := range files {

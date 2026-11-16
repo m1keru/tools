@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -123,6 +126,7 @@ type profile struct {
 	Tag      string
 	Kind     string
 	Node     *Node
+	User     *User
 	Outbound obj
 	Link     string
 }
@@ -138,15 +142,15 @@ func profiles(st *State, u *User) []profile {
 			}
 			if n.XHTTP.Port != 0 {
 				tag := n.Name + "-" + kindXHTTP
-				out = append(out, profile{tag, kindXHTTP, n, xhttpOutbound(tag, n, u.UUID, st.Fingerprint), xhttpLink(tag, n, u, st.Fingerprint)})
+				out = append(out, profile{tag, kindXHTTP, n, u, xhttpOutbound(tag, n, u.UUID, st.Fingerprint), xhttpLink(tag, n, u, st.Fingerprint)})
 			}
 			if n.Vision.Port != 0 {
 				tag := n.Name + "-" + kindVision
-				out = append(out, profile{tag, kindVision, n, visionOutbound(tag, n, u.UUID, st.Fingerprint), visionLink(tag, n, u, st.Fingerprint)})
+				out = append(out, profile{tag, kindVision, n, u, visionOutbound(tag, n, u.UUID, st.Fingerprint), visionLink(tag, n, u, st.Fingerprint)})
 			}
 			if n.Hy2.Port != 0 {
 				tag := n.Name + "-" + kindHy2
-				out = append(out, profile{tag, kindHy2, n, hy2Outbound(tag, n, u.Hy2Auth), hy2Link(tag, n, u)})
+				out = append(out, profile{tag, kindHy2, n, u, hy2Outbound(tag, n, u.Hy2Auth), hy2Link(tag, n, u)})
 			}
 		}
 	}
@@ -208,11 +212,30 @@ func subscription(ps []profile) string {
 	return base64.StdEncoding.EncodeToString([]byte(strings.Join(links, "\n") + "\n"))
 }
 
-func localInbounds() []any {
+// localProxy is where the user's desktop configs listen. Any program on the
+// machine can connect to 127.0.0.1, and through an open proxy on Xray's stock
+// port it learns the exit address in one request. So the proxy asks for a
+// password, and both it and the ports come from the user's secret: they stay
+// the same between renders and need no field in the state. The ports sit
+// below the ranges operating systems hand out for outgoing connections.
+//
+// shortcut: the port cannot be chosen, give User a field for it when one
+// clashes with a service already listening on somebody's machine.
+func (u *User) localProxy() (pass string, socksPort, httpPort int) {
+	sum := sha256.Sum256([]byte("obhod local proxy\n" + u.UUID))
+	port := 20000 + int(binary.BigEndian.Uint16(sum[:2]))%12000
+	return hex.EncodeToString(sum[2:14]), port, port + 1
+}
+
+func localInbounds(u *User) []any {
 	sniff := obj{"enabled": true, "destOverride": []string{"http", "tls", "quic"}, "routeOnly": true}
+	pass, socksPort, httpPort := u.localProxy()
+	accounts := []any{obj{"user": u.Name, "pass": pass}}
 	return []any{
-		obj{"tag": "socks", "listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": obj{"udp": true}, "sniffing": sniff},
-		obj{"tag": "http", "listen": "127.0.0.1", "port": 10809, "protocol": "http", "sniffing": sniff},
+		obj{"tag": "socks", "listen": "127.0.0.1", "port": socksPort, "protocol": "socks",
+			"settings": obj{"auth": "password", "accounts": accounts, "udp": true}, "sniffing": sniff},
+		obj{"tag": "http", "listen": "127.0.0.1", "port": httpPort, "protocol": "http",
+			"settings": obj{"accounts": accounts}, "sniffing": sniff},
 	}
 }
 
@@ -227,13 +250,13 @@ func splitRules() []any {
 	}
 }
 
-func baseClient(proxies []any, rules []any) obj {
+func baseClient(u *User, proxies []any, rules []any) obj {
 	outbounds := append(append([]any{}, proxies...),
 		obj{"tag": "direct", "protocol": "freedom"},
 		obj{"tag": "block", "protocol": "blackhole"})
 	return obj{
 		"log":       obj{"loglevel": "warning"},
-		"inbounds":  localInbounds(),
+		"inbounds":  localInbounds(u),
 		"outbounds": outbounds,
 		"routing":   obj{"domainStrategy": "AsIs", "rules": rules},
 	}
@@ -242,17 +265,18 @@ func baseClient(proxies []any, rules []any) obj {
 // singleClient is a config that uses exactly one profile. These are the
 // manual fallbacks: nothing probes them in the background.
 //
-// Through an exit, Russian destinations go direct. Through a relay they do
-// not: a relay is for networks where only whitelisted addresses answer, so
-// direct connections fail there, and the relay, which sits inside Russia,
-// serves Russian destinations itself.
+// Russian destinations go direct: a Russian service reached through a node
+// learns the node's address, and for a relay that is the very address clients
+// connect to. A relay with AllowRU is the exception. It is for networks where
+// only whitelisted addresses answer and direct connections fail, so it takes
+// everything and serves Russian destinations itself.
 func singleClient(p profile) obj {
 	rules := splitRules()
-	if p.Node.IsRelay() {
+	if p.Node.IsRelay() && p.Node.AllowRU {
 		rules = []any{obj{"ip": []string{"geoip:private"}, "outboundTag": "direct"}}
 	}
 	rules = append(rules, obj{"network": "tcp,udp", "outboundTag": p.Tag})
-	return baseClient([]any{p.Outbound}, rules)
+	return baseClient(p.User, []any{p.Outbound}, rules)
 }
 
 // autoProfiles picks the profiles that are safe to health-check in the
@@ -298,7 +322,7 @@ func autoClient(ps []profile) obj {
 		costs = append(costs, obj{"match": p.Tag, "value": cost})
 	}
 	rules := append(splitRules(), obj{"network": "tcp,udp", "balancerTag": "auto"})
-	c := baseClient(proxies, rules)
+	c := baseClient(auto[0].User, proxies, rules)
 	c["routing"].(obj)["balancers"] = []any{obj{
 		"tag":         "auto",
 		"selector":    tags,

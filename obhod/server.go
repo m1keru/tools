@@ -17,12 +17,14 @@ func pemLines(s string) []string {
 
 // serverConfig builds the Xray config for one node.
 //
-// An exit sends everything to the internet and, unless AllowRU is set, refuses
-// Russian destinations: clients already route those direct, and an exit that
-// never touches Russian services cannot be found in their logs.
+// A node refuses Russian destinations unless AllowRU is set: clients already
+// route those direct, and a node that never touches Russian services cannot be
+// found in their logs.
 //
-// A relay serves Russian destinations itself and forwards the rest to its
-// exit over XHTTP, under an identity of its own so it can be revoked alone.
+// An exit sends the rest to the internet. A relay forwards it to its exit over
+// XHTTP, under an identity of its own so it can be revoked alone. A relay with
+// AllowRU serves Russian destinations itself, from the address its clients
+// connect to: that is for networks where only whitelisted addresses answer.
 func serverConfig(st *State, n *Node) obj {
 	sniff := obj{"enabled": true, "destOverride": []string{"http", "tls", "quic"}, "routeOnly": true}
 	var inbounds []any
@@ -106,22 +108,21 @@ func serverConfig(st *State, n *Node) obj {
 		obj{"network": "tcp", "port": "25", "outboundTag": "block"},
 		obj{"protocol": []string{"bittorrent"}, "outboundTag": "block"},
 	}
-	var outbounds []any
-
-	switch {
-	case n.IsRelay():
+	outbounds := []any{direct, block}
+	if n.IsRelay() {
 		up := st.node(n.Upstream)
 		outbounds = []any{xhttpOutbound("upstream", up, n.LinkUUID, st.Fingerprint), direct, block}
-		rules = append(rules,
-			obj{"domain": ruDomains, "outboundTag": "direct"},
-			obj{"ip": []string{"geoip:ru"}, "outboundTag": "direct"})
-	case n.AllowRU:
-		outbounds = []any{direct, block}
-	default:
-		outbounds = []any{direct, block}
+	}
+	switch {
+	case !n.AllowRU:
 		rules = append(rules,
 			obj{"domain": ruDomains, "outboundTag": "block"},
 			obj{"ip": []string{"geoip:ru"}, "outboundTag": "block"})
+	case n.IsRelay():
+		// Without this rule they would follow the default route to the exit.
+		rules = append(rules,
+			obj{"domain": ruDomains, "outboundTag": "direct"},
+			obj{"ip": []string{"geoip:ru"}, "outboundTag": "direct"})
 	}
 
 	return obj{

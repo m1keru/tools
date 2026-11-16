@@ -163,7 +163,7 @@ func cmdNode(args []string) error {
 		fs.IntVar(&o.XHTTPPort, "xhttp-port", 443, "TCP-порт XHTTP+REALITY, 0 отключает")
 		fs.IntVar(&o.VisionPort, "vision-port", 8443, "TCP-порт Vision+REALITY, 0 отключает")
 		fs.IntVar(&o.Hy2Port, "hy2-port", 443, "UDP-порт Hysteria2, 0 отключает")
-		fs.BoolVar(&o.AllowRU, "allow-ru", false, "выходной узел: не запрещать российские адреса")
+		fs.BoolVar(&o.AllowRU, "allow-ru", false, "не запрещать российские адреса; relay с этим флагом обслуживает их сам, со своего адреса")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
