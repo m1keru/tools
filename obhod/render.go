@@ -57,7 +57,7 @@ func installScript(st *State, n *Node) ([]byte, error) {
 	return buf.Bytes(), err
 }
 
-// render writes everything under dir:
+// render replaces nodes/ and clients/ under dir with:
 //
 //	nodes/<node>/install.sh          run on the server
 //	clients/<user>/links.txt         share links, one per line
@@ -72,6 +72,13 @@ func render(st *State, dir string) ([]string, error) {
 	}
 	if len(st.Users) == 0 {
 		return nil, fmt.Errorf("no users: add one with `obhod user add`")
+	}
+	// Rewritten whole, so a removed node or user leaves nothing behind; the
+	// rest of dir is not ours.
+	for _, sub := range []string{"nodes", "clients"} {
+		if err := os.RemoveAll(filepath.Join(dir, sub)); err != nil {
+			return nil, err
+		}
 	}
 	var written []string
 	write := func(rel string, data []byte) error {

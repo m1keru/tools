@@ -288,7 +288,7 @@ func cmdNode(args []string) error {
 			return fmt.Errorf("no node %q", name)
 		}
 		if rs := st.relaysOf(name); len(rs) > 0 {
-			return fmt.Errorf("node %q is the upstream of relay %q; remove the relay first", name, rs[0].Name)
+			return fmt.Errorf("node %q is an exit of relay %q; drop it from the relay first: obhod node rotate -name %s -upstream <other exits>", name, rs[0].Name, rs[0].Name)
 		}
 		var keep []*Node
 		for _, n := range st.Nodes {
@@ -380,7 +380,7 @@ func portLabel(proto string, port int) string {
 
 func cmdRender(args []string) error {
 	fs, path := newFlags("render")
-	out := fs.String("out", "out", "каталог для результата")
+	out := fs.String("out", "out", "каталог для результата; nodes/ и clients/ в нём пишутся заново")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

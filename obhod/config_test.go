@@ -997,6 +997,33 @@ func TestRenderWritesLocalProxyAddresses(t *testing.T) {
 	}
 }
 
+// A folder handed to a person must not carry profiles of a removed node or a
+// revoked user from an earlier render.
+func TestRenderDropsRemovedNodesAndUsers(t *testing.T) {
+	st := testState(t)
+	dir := t.TempDir()
+	if _, err := render(st, dir); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(dir, "package.zip")
+	if err := os.WriteFile(other, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st.Nodes = []*Node{st.node("nl1"), st.node("ru1")}
+	st.Users = st.Users[:1]
+	if _, err := render(st, dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{"nodes/fi1", "clients/anna", "clients/me/xray/fi1-vision.json"} {
+		if _, err := os.Stat(filepath.Join(dir, gone)); !os.IsNotExist(err) {
+			t.Errorf("%s still there after render", gone)
+		}
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Errorf("render removed a file it does not own: %v", err)
+	}
+}
+
 func TestRenderWritesPrivateFiles(t *testing.T) {
 	st := testState(t)
 	dir := t.TempDir()
