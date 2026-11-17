@@ -857,7 +857,7 @@ func TestTargetProblem(t *testing.T) {
 	}
 
 	// An unreachable site says nothing about the site: the machine running
-	// obhod may simply sit in a network that cannot see it.
+	// ansibles may simply sit in a network that cannot see it.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

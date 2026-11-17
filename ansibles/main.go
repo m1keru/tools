@@ -1,4 +1,4 @@
-// Command obhod builds and operates a small, redundant set of censorship
+// Command ansibles builds and operates a small, redundant set of censorship
 // circumvention nodes: it keeps the keys, renders the server installers and
 // client configs, and diagnoses which kind of block a node is under.
 package main
@@ -13,19 +13,19 @@ import (
 	"time"
 )
 
-const usage = `obhod: несколько независимых транспортов на нескольких узлах, одна точка управления.
+const usage = `ansibles: несколько независимых транспортов на нескольких узлах, одна точка управления.
 
-  obhod init                         создать состояние (obhod.json) с пользователем "me"
-  obhod user add ИМЯ | rm ИМЯ        добавить или отозвать пользователя
-  obhod node add -name N -addr IP -target САЙТ:443 [-upstream EXIT[,EXIT]] ...
+  ansibles init                      создать состояние (obhod.json) с пользователем "me"
+  ansibles user add ИМЯ | rm ИМЯ     добавить или отозвать пользователя
+  ansibles node add -name N -addr IP -target САЙТ:443 [-upstream EXIT[,EXIT]] ...
                                      добавить выходной узел, а с -upstream: relay перед ним
-  obhod node rotate -name N [-addr IP] [-target САЙТ:443] [-upstream EXIT[,EXIT]] [-rekey]
+  ansibles node rotate -name N [-addr IP] [-target САЙТ:443] [-upstream EXIT[,EXIT]] [-rekey]
                                      сменить адрес, сайт-цель, выходы relay или все ключи узла
-  obhod node rm ИМЯ                  удалить узел
-  obhod set [-fp F] [-xray V]        отпечаток TLS клиентов, версия Xray на серверах
-  obhod show                         узлы и пользователи, без секретов
-  obhod render [-out DIR]            собрать установщики серверов и клиентские конфиги
-  obhod probe [-burst] [УЗЕЛ...]     проверить узлы из этой сети и назвать тип блокировки
+  ansibles node rm ИМЯ               удалить узел
+  ansibles set [-fp F] [-xray V]     отпечаток TLS клиентов, версия Xray на серверах
+  ansibles show                      узлы и пользователи, без секретов
+  ansibles render [-out DIR]         собрать установщики серверов и клиентские конфиги
+  ansibles probe [-burst] [УЗЕЛ...]  проверить узлы из этой сети и назвать тип блокировки
 
 Файл состояния: флаг -state или переменная OBHOD_STATE, по умолчанию ./obhod.json.
 В нём приватные ключи: не кладите его в git. Подробности: README.md.
@@ -33,7 +33,7 @@ const usage = `obhod: несколько независимых транспор
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "obhod:", err)
+		fmt.Fprintln(os.Stderr, "ansibles:", err)
 		os.Exit(1)
 	}
 }
@@ -72,7 +72,7 @@ func run(args []string) error {
 		fmt.Print(usage)
 		return nil
 	}
-	return fmt.Errorf("unknown command %q; run `obhod help`", cmd)
+	return fmt.Errorf("unknown command %q; run `ansibles help`", cmd)
 }
 
 func cmdInit(args []string) error {
@@ -94,20 +94,20 @@ func cmdInit(args []string) error {
 	if err := st.save(*path); err != nil {
 		return err
 	}
-	fmt.Printf("создан %s (права 0600). Дальше: obhod node add -name ... -addr ... -target ...\n", *path)
+	fmt.Printf("создан %s (права 0600). Дальше: ansibles node add -name ... -addr ... -target ...\n", *path)
 	return nil
 }
 
 func cmdUser(args []string) error {
 	if len(args) < 1 {
-		return errors.New("usage: obhod user add NAME | obhod user rm NAME")
+		return errors.New("usage: ansibles user add NAME | ansibles user rm NAME")
 	}
 	fs, path := newFlags("user")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: obhod user add NAME | obhod user rm NAME")
+		return errors.New("usage: ansibles user add NAME | ansibles user rm NAME")
 	}
 	name := fs.Arg(0)
 	st, err := loadState(*path)
@@ -141,14 +141,14 @@ func cmdUser(args []string) error {
 	if err := st.save(*path); err != nil {
 		return err
 	}
-	fmt.Println("готово. Список пользователей зашит в конфиг каждого узла: выполните obhod render")
+	fmt.Println("готово. Список пользователей зашит в конфиг каждого узла: выполните ansibles render")
 	fmt.Println("и перезапустите install.sh на всех узлах, иначе изменение не подействует.")
 	return nil
 }
 
 func cmdNode(args []string) error {
 	if len(args) < 1 {
-		return errors.New("usage: obhod node add|rotate|rm ...")
+		return errors.New("usage: ansibles node add|rotate|rm ...")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -186,7 +186,7 @@ func cmdNode(args []string) error {
 			return err
 		}
 		warnTarget(n)
-		fmt.Printf("узел %s добавлен. Дальше: obhod render, затем install.sh на сервере.\n", n.Name)
+		fmt.Printf("узел %s добавлен. Дальше: ansibles render, затем install.sh на сервере.\n", n.Name)
 		if n.IsRelay() {
 			fmt.Printf("Relay получает свою учётную запись на выходах %s: переустановите и их.\n", n.Upstream)
 		}
@@ -258,10 +258,10 @@ func cmdNode(args []string) error {
 		}
 		if *addr == "" && *target == "" && *sni == "" && !*rekey {
 			// Only the relay's exits changed: what clients hold stays valid.
-			fmt.Println("Выполните obhod render. Клиентам менять нечего.")
+			fmt.Println("Выполните ansibles render. Клиентам менять нечего.")
 			return nil
 		}
-		fmt.Printf("узел %s изменён. Выполните obhod render, переустановите узел и раздайте клиентам новые ссылки.\n", n.Name)
+		fmt.Printf("узел %s изменён. Выполните ansibles render, переустановите узел и раздайте клиентам новые ссылки.\n", n.Name)
 		if rs := st.relaysOf(n.Name); len(rs) > 0 {
 			var names []string
 			for _, r := range rs {
@@ -277,7 +277,7 @@ func cmdNode(args []string) error {
 			return err
 		}
 		if fs.NArg() != 1 {
-			return errors.New("usage: obhod node rm NAME")
+			return errors.New("usage: ansibles node rm NAME")
 		}
 		name := fs.Arg(0)
 		st, err := loadState(*path)
@@ -288,7 +288,7 @@ func cmdNode(args []string) error {
 			return fmt.Errorf("no node %q", name)
 		}
 		if rs := st.relaysOf(name); len(rs) > 0 {
-			return fmt.Errorf("node %q is an exit of relay %q; drop it from the relay first: obhod node rotate -name %s -upstream <other exits>", name, rs[0].Name, rs[0].Name)
+			return fmt.Errorf("node %q is an exit of relay %q; drop it from the relay first: ansibles node rotate -name %s -upstream <other exits>", name, rs[0].Name, rs[0].Name)
 		}
 		var keep []*Node
 		for _, n := range st.Nodes {
@@ -341,7 +341,7 @@ func cmdSet(args []string) error {
 	if err := st.save(*path); err != nil {
 		return err
 	}
-	fmt.Println("готово. Выполните obhod render; отпечаток меняет клиентские конфиги, версия Xray: установщики.")
+	fmt.Println("готово. Выполните ansibles render; отпечаток меняет клиентские конфиги, версия Xray: установщики.")
 	return nil
 }
 

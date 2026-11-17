@@ -109,7 +109,7 @@ func loadState(path string) (*State, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("%s not found: run `obhod init` first", path)
+			return nil, fmt.Errorf("%s not found: run `ansibles init` first", path)
 		}
 		return nil, err
 	}

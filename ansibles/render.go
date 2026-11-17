@@ -68,10 +68,10 @@ func installScript(st *State, n *Node) ([]byte, error) {
 //	clients/<user>/xray/<tag>.json   desktop config pinned to one profile
 func render(st *State, dir string) ([]string, error) {
 	if len(st.Nodes) == 0 {
-		return nil, fmt.Errorf("no nodes: add one with `obhod node add`")
+		return nil, fmt.Errorf("no nodes: add one with `ansibles node add`")
 	}
 	if len(st.Users) == 0 {
-		return nil, fmt.Errorf("no users: add one with `obhod user add`")
+		return nil, fmt.Errorf("no users: add one with `ansibles user add`")
 	}
 	// Rewritten whole, so a removed node or user leaves nothing behind; the
 	// rest of dir is not ours.

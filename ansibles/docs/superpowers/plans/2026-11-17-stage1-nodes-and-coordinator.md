@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** одна программа `obhod` со встроенным Xray поднимает выходы и входы одной командой с ноутбука, координатор на выходе сам разносит подписанную карту и список людей по узлам внутри туннелей и пишет в Telegram, когда узел упал.
+**Goal:** одна программа `ansibles` со встроенным Xray поднимает выходы и входы одной командой с ноутбука, координатор на выходе сам разносит подписанную карту и список людей по узлам внутри туннелей и пишет в Telegram, когда узел упал.
 
-**Architecture:** новый код живёт во внутренних пакетах `obhod/internal/...`, старый генератор остаётся рабочим под `obhod legacy` до этапа 3. Владелец подписывает карту и список людей ключом Ed25519 на ноутбуке; ноутбук ставит узлы и отдаёт состояние координатору по ssh; узлы раз в минуту ходят к координатору через своё же ядро Xray на имени `coord.obhod.invalid`.
+**Architecture:** новый код живёт во внутренних пакетах `ansibles/internal/...`, старый генератор остаётся рабочим под `ansibles legacy` до этапа 3. Владелец подписывает карту и список людей ключом Ed25519 на ноутбуке; ноутбук ставит узлы и отдаёт состояние координатору по ssh; узлы раз в минуту ходят к координатору через своё же ядро Xray на имени `coord.ansibles.invalid`.
 
 **Tech Stack:** Go (toolchain 1.27), `github.com/xtls/xray-core` как библиотека, стандартная библиотека; bash для установщика на сервере; системные `ssh` и `sshpass`.
 
-**Spec:** `obhod/docs/superpowers/specs/2026-11-17-auto-update-design.md` (согласован, коммит b92d0a8). Этот план — этап 1 из таблицы «Этапы».
+**Spec:** `ansibles/docs/superpowers/specs/2026-11-17-auto-update-design.md` (согласован, коммит b92d0a8). Этот план — этап 1 из таблицы «Этапы».
 
 **Порядок выполнения:** 1, 13, затем 2–12, 14, 15. Скрипт сборки (Task 13) нужен раньше: из него берут `geoip.dat` и `geosite.dat` тесты Task 4 и `dist/VERSION` команда Task 12.
 
@@ -18,24 +18,25 @@
 
 | № | Решение | Почему | Цена ошибки |
 |---|---|---|---|
-| R1 | Команды владельца доходят до координатора по ssh (`obhod coord put`, `obhod coord status` на узле координатора) | ноутбук и так ходит по ssh ставить узлы; клиента внутри туннеля до этапа 2 нет | на этапе 2 добавить путь через туннель; ssh-путь остаётся запасным |
+| R1 | Команды владельца доходят до координатора по ssh (`ansibles coord put`, `ansibles coord status` на узле координатора) | ноутбук и так ходит по ssh ставить узлы; клиента внутри туннеля до этапа 2 нет | на этапе 2 добавить путь через туннель; ssh-путь остаётся запасным |
 | R2 | Список адресов для выхода «только для входов» обновляет `node add/rm` входа по ssh, а не сам узел | программа на узле работает без root; давать ей менять firewall — путь к повышению прав | если входы будут меняться без ноутбука (не в этом дизайне), понадобится привилегированный помощник |
 | R3 | В firewall хоста открываются порты всех маскировок узла сразу, при установке | программа на узле firewall не трогает; закрытый «запасной» порт сломал бы этап 4 | порт без слушателя виден сканеру как закрытый (RST), не как служба |
 | R4 | На этапе 1 узел слушает только основную маскировку (`Disguises[0]`) | переключение — этап 4 | нет |
 | R5 | Новая карта или список людей → перезапуск ядра Xray в процессе (старое ядро закрыть, новое поднять, при неудаче вернуть старое) | просто и проверяемо; «без обрыва соединений» требуется только на этапе 4 | при каждой смене версии короткий обрыв соединений через узел |
-| R6 | Старые команды переезжают под `obhod legacy ...` | имена `node add`, `user add`, `init` нужны новым командам; нынешние узлы обслуживаются старым кодом до этапа 3 | владелец набирает `legacy` до перевода |
+| R6 | Старые команды переезжают под `ansibles legacy ...` | имена `node add`, `user add`, `init` нужны новым командам; нынешние узлы обслуживаются старым кодом до этапа 3 | владелец набирает `legacy` до перевода |
 | R7 | Установщик нового узла `node.sh.tmpl` — копия `install.sh.tmpl` с правками; старый удаляется на этапе 3 | общий шаблон с ветками усложнил бы удаление старого | ~500 строк дублируются до этапа 3 |
 | R8 | Учётные данные узла у других узлов (UUID узла) узел создаёт сам; они в списке людей (раздел «nodes»), который получают только узлы | приватное не покидает узел; клиенты UUID узлов не видят | нет |
 | R9 | Состояние ноутбука — новый файл `network.json`, отдельно от старого `obhod.json` | старое продолжает работать до этапа 3 | два файла с ключами на ноутбуке до этапа 3 |
 | R10 | Отпечаток TLS клиента (`fingerprint`) — поле карты | узлы собирают исходящие соединения сами | нет |
 | R11 | На этапе 1 узлы получают полные `geoip.dat` и `geosite.dat` из выпуска Xray той же версии; урезание — этап 2 | урезанные нужны клиентам, не серверам | ~20 МБ лишнего на сервере |
-| R12 | `obhod alert set` сразу шлёт пробное сообщение | иначе неверный токен выяснится только при первой беде | нет |
+| R12 | `ansibles alert set` сразу шлёт пробное сообщение | иначе неверный токен выяснится только при первой беде | нет |
 | R13 | Версия карты и списка людей — счётчик, а не время | часы ноутбука и узлов не участвуют | нет |
+| R15 | Проект и программа называются `ansibles` (решение владельца 17.11.2026). На серверах новой сети всё под этим именем: служба и пользователь `ansibles`, `/opt/ansibles`, цепочка iptables `ANSIBLES`, `coord.ansibles.invalid`. Имена старой установки — `obhod.json`, служба `obhod-xray`, `/opt/obhod`, цепочка `OBHOD`, соль `"obhod local proxy"` локального прокси — не меняются | это работающие узлы и клиенты: новое имя в старом установщике поставило бы вторую копию рядом с первой, новая соль сменила бы людям порты и пароли прокси. Уходят на этапе 3 | нет |
 | R14 | `push` берёт версии выше тех, что уже у координатора | после сбоя или восстановления ноутбука из копии координатор иначе отверг бы «старую» версию | нет |
 
 ## Global Constraints
 
-- В репозиторий не попадают адреса, имена серверов, сайты-маски, ключи, токены: `network.json`, `targets.txt`, `dist/` — в `obhod/.gitignore`.
+- В репозиторий не попадают адреса, имена серверов, сайты-маски, ключи, токены: `network.json`, `targets.txt`, `dist/` — в `ansibles/.gitignore`.
 - Приватные ключи узла создаются на узле и не покидают его; в карту уходят только открытые.
 - Подпись владельца — Ed25519; ключ только на ноутбуке. Узел и координатор принимают карту и список людей только с этой подписью и только с версией больше текущей.
 - На чужом сервере сначала разведка `scripts/recon.sh` (только чтение), затем `node.sh --check`; неожиданное — стоп. Флаги `--open-firewall`, `--install-deps` — только из согласий владельца для этого хоста.
@@ -60,17 +61,17 @@
 ### Task 1: Xray как библиотека, общие ключи и проверка сайта-маски
 
 **Files:**
-- Modify: `obhod/go.mod`, `obhod/go.sum`
-- Create: `obhod/internal/keys/keys.go` (перенос из `obhod/keys.go`), `obhod/internal/keys/keys_test.go`
-- Create: `obhod/internal/target/target.go` (перенос `targetProblem` из `obhod/state.go`), `obhod/internal/target/target_test.go` (перенос `TestTargetProblem` и помощника `tlsSite` из `config_test.go`)
-- Create: `obhod/internal/xraycore/xraycore.go`, `obhod/internal/xraycore/xraycore_test.go`
-- Modify: `obhod/keys.go` (удалить), `obhod/state.go`, `obhod/main.go`, `obhod/config_test.go` — старый код зовёт новые пакеты
+- Modify: `ansibles/go.mod`, `ansibles/go.sum`
+- Create: `ansibles/internal/keys/keys.go` (перенос из `ansibles/keys.go`), `ansibles/internal/keys/keys_test.go`
+- Create: `ansibles/internal/target/target.go` (перенос `targetProblem` из `ansibles/state.go`), `ansibles/internal/target/target_test.go` (перенос `TestTargetProblem` и помощника `tlsSite` из `config_test.go`)
+- Create: `ansibles/internal/xraycore/xraycore.go`, `ansibles/internal/xraycore/xraycore_test.go`
+- Modify: `ansibles/keys.go` (удалить), `ansibles/state.go`, `ansibles/main.go`, `ansibles/config_test.go` — старый код зовёт новые пакеты
 
 **Interfaces:**
 - Produces: `keys.NewX25519() (priv, pub string, err error)`, `keys.NewUUID() (string, error)`, `keys.RandHex(n int) (string, error)`, `keys.RandToken(n int) (string, error)`, `keys.NewSelfSignedCert(name string) (certPEM, keyPEM, sha256Hex string, err error)` — тела те же, что в `keys.go`; `target.Problem(target, serverName string, timeout time.Duration) string`; `xraycore.Instance` (интерфейс: `Close() error`, `Dial(ctx context.Context, network, addr string) (net.Conn, error)`), `xraycore.Start(configJSON []byte) (xraycore.Instance, error)`, `xraycore.Check(configJSON []byte) error`.
 
 - [ ] **Step 1:** Подключить xray-core версии выпуска v26.11.9 (Go-тегов `v1.*` для неё нет, берётся коммит выпуска):
-  Run: `cd obhod && go get github.com/xtls/xray-core@676eaf66f8f05d4d558ee7a74b4736623d3feeb9 && go mod tidy`
+  Run: `cd ansibles && go get github.com/xtls/xray-core@676eaf66f8f05d4d558ee7a74b4736623d3feeb9 && go mod tidy`
   Expected: в `go.mod` строка `github.com/xtls/xray-core v1.…-…-676eaf66f8f0`; директива `go` поднята до требуемой xray-core.
 - [ ] **Step 2:** Перенести `keys.go` в `internal/keys` с заглавными именами, `targetProblem` — в `internal/target` как `Problem`; старый код (`state.go`, `main.go`, тесты) зовёт их. Тест `TestTargetProblem` переезжает в `internal/target`.
   Run: `go test ./...`
@@ -81,25 +82,25 @@
 - [ ] **Step 6:** Run: `go test ./... && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null . && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null .` — Expected: PASS и обе сборки без ошибок.
 - [ ] **Step 7: Commit** — `git commit -m "Embed xray-core and move key and target helpers to internal packages"`
 
-### Task 2: Старые команды под `obhod legacy`
+### Task 2: Старые команды под `ansibles legacy`
 
 **Files:**
-- Modify: `obhod/main.go`, `obhod/README.md`
-- Test: `obhod/main_test.go` (создать)
+- Modify: `ansibles/main.go`, `ansibles/README.md`
+- Test: `ansibles/main_test.go` (создать)
 
 **Interfaces:**
 - Produces: `run(args []string) error` диспетчеризует `legacy` в старый разбор (`runLegacy(args []string) error` — нынешнее тело `run`); прочие команды добавят задачи 7, 8, 11, 12.
 
-- [ ] **Step 1: Написать падающие тесты** `TestLegacyShowRuns` (`run([]string{"legacy","show","-state", файл})` на состоянии из `testState(t)`, сохранённом во временный файл, — без ошибки) и `TestOldCommandPointsToLegacy` (`run([]string{"render"})` возвращает ошибку, текст содержит `obhod legacy render`).
+- [ ] **Step 1: Написать падающие тесты** `TestLegacyShowRuns` (`run([]string{"legacy","show","-state", файл})` на состоянии из `testState(t)`, сохранённом во временный файл, — без ошибки) и `TestOldCommandPointsToLegacy` (`run([]string{"render"})` возвращает ошибку, текст содержит `ansibles legacy render`).
 - [ ] **Step 2:** Run: `go test -run 'TestLegacy|TestOldCommand' .` — Expected: FAIL.
-- [ ] **Step 3:** Перенести нынешний `switch` в `runLegacy`; `run` знает `legacy` и новые имена; старое имя без `legacy` (`render`, `probe`, `show`, `set`, `node rotate`) → ошибка «эта команда теперь `obhod legacy …`». Справка `usage` делится на «Новая сеть» и «legacy (до перевода узлов)».
+- [ ] **Step 3:** Перенести нынешний `switch` в `runLegacy`; `run` знает `legacy` и новые имена; старое имя без `legacy` (`render`, `probe`, `show`, `set`, `node rotate`) → ошибка «эта команда теперь `ansibles legacy …`». Справка `usage` делится на «Новая сеть» и «legacy (до перевода узлов)».
 - [ ] **Step 4:** Run: `go test ./...` — Expected: PASS.
-- [ ] **Step 5:** В README все примеры старых команд получают `legacy`; одна фраза, что это до этапа 3. Commit — `git commit -m "Move the current commands under obhod legacy"`
+- [ ] **Step 5:** В README все примеры старых команд получают `legacy`; одна фраза, что это до этапа 3. Commit — `git commit -m "Move the current commands under ansibles legacy"`
 
 ### Task 3: Карта, список людей и подписи (`internal/netmap`)
 
 **Files:**
-- Create: `obhod/internal/netmap/netmap.go`, `obhod/internal/netmap/sign.go`, `obhod/internal/netmap/netmap_test.go`
+- Create: `ansibles/internal/netmap/netmap.go`, `ansibles/internal/netmap/sign.go`, `ansibles/internal/netmap/netmap_test.go`
 
 **Interfaces:**
 - Produces:
@@ -140,13 +141,13 @@
 ### Task 4: Конфиг Xray для узла (`internal/xcfg`)
 
 **Files:**
-- Create: `obhod/internal/xcfg/xcfg.go`, `obhod/internal/xcfg/xcfg_test.go`, `obhod/internal/xcfg/geo_test.go` (помощник `requireGeodata`)
+- Create: `ansibles/internal/xcfg/xcfg.go`, `ansibles/internal/xcfg/xcfg_test.go`, `ansibles/internal/xcfg/geo_test.go` (помощник `requireGeodata`)
 
 **Interfaces:**
 - Consumes: `netmap.Map`, `netmap.Roster`, `netmap.Secrets` (Task 3); `xraycore.Check` (Task 1).
 - Produces:
   ```go
-  const CoordHost = "coord.obhod.invalid"
+  const CoordHost = "coord.ansibles.invalid"
   const CoordLocalPort = 10443 // the coordinator's HTTPS on 127.0.0.1
   func NodeConfig(m *netmap.Map, r *netmap.Roster, sec *netmap.Secrets) ([]byte, error)
   ```
@@ -156,17 +157,17 @@
 - вход (inbound) — только `Disguises[0]` этого узла (R4); пользователи: все `People`; у выхода ещё все `Roster.Nodes`, кроме себя. Почта пользователя — `имя@ID маскировки`, у узлов `node-имя@ID`.
 - исходящие: выход — первым `direct` (freedom), затем `block`, затем `coord`; вход — `<выход>-up` на основную маскировку каждого выхода из `ExitsFor` под своим `NodeUUID` (цены 1, 100, …), `direct`, `block`, балансировщик `upstream` с `burstObservatory`.
 - `coord`: на координаторе — freedom с `redirect` `127.0.0.1:10443` и правилом `finalRules`, разрешающим ровно этот адрес и порт (имена полей сверить с `infra/conf/freedom.go` закреплённой версии xray-core); на прочих выходах — исходящее на основную маскировку координатора под своим `NodeUUID`.
-- правила по порядку: домен `full:coord.obhod.invalid` → `coord` (у входа — балансировщик `upstream`); TCP порт 25 → `block`; BitTorrent → `block`; `ruDomains` и `geoip:ru` → `block`; у входа последнее правило `tcp,udp` → балансировщик `upstream`.
+- правила по порядку: домен `full:coord.ansibles.invalid` → `coord` (у входа — балансировщик `upstream`); TCP порт 25 → `block`; BitTorrent → `block`; `ruDomains` и `geoip:ru` → `block`; у входа последнее правило `tcp,udp` → балансировщик `upstream`.
 - `log`: `loglevel warning`, `access none`.
 
 - [ ] **Step 1: Написать падающие тесты** (собирают карту из координатора-выхода `a`, выхода `b`, входа `r` и роутер с людьми `me`, `anna`):
   - `TestExitAcceptsPeopleAndOtherNodes`: у `b` среди пользователей входа UUID людей и узлов `a`, `r`, но не свой.
   - `TestEntryAcceptsOnlyPeople`: у `r` только UUID людей.
   - `TestEntryUsesEveryExit`: у `r` исходящие `a-up`, `b-up`; селектор балансировщика `["a-up","b-up"]`; цены 1 и 100.
-  - `TestCoordinatorSendsCoordHostToLocalPort`: у `a` правило домена `coord.obhod.invalid` ведёт на `coord`, а `coord` — freedom с `redirect` `127.0.0.1:10443`.
+  - `TestCoordinatorSendsCoordHostToLocalPort`: у `a` правило домена `coord.ansibles.invalid` ведёт на `coord`, а `coord` — freedom с `redirect` `127.0.0.1:10443`.
   - `TestExitSendsCoordHostToCoordinator`: у `b` `coord` — VLESS на адрес и порт основной маскировки `a`, `id` = `NodeUUID` узла `b`.
   - `TestNodesRefuseRussianAndMail`: у всех трёх правила на порт 25, BitTorrent, `ruDomains`, `geoip:ru` ведут на `block`, и правило `coord` стоит раньше них.
-  - `TestNodeConfigsLoadInXray`: для `a`, `b`, `r` `xraycore.Check(cfg)` без ошибки. Нужны `geoip.dat` и `geosite.dat`: `requireGeodata(t)` ставит `XRAY_LOCATION_ASSET` на `obhod/dist` и пропускает тест с сообщением «запустите scripts/build.sh», если файлов нет.
+  - `TestNodeConfigsLoadInXray`: для `a`, `b`, `r` `xraycore.Check(cfg)` без ошибки. Нужны `geoip.dat` и `geosite.dat`: `requireGeodata(t)` ставит `XRAY_LOCATION_ASSET` на `ansibles/dist` и пропускает тест с сообщением «запустите scripts/build.sh», если файлов нет.
 - [ ] **Step 2:** Run: `go test ./internal/xcfg/` — Expected: FAIL.
 - [ ] **Step 3:** Реализовать `NodeConfig`.
 - [ ] **Step 4:** Run: `scripts/build.sh` (Task 13), затем `go test ./internal/xcfg/ -v` — Expected: PASS, ни одного SKIP.
@@ -175,7 +176,7 @@
 ### Task 5: Алерты в Telegram (`internal/alert`)
 
 **Files:**
-- Create: `obhod/internal/alert/alert.go`, `obhod/internal/alert/alert_test.go`
+- Create: `ansibles/internal/alert/alert.go`, `ansibles/internal/alert/alert_test.go`
 
 **Interfaces:**
 - Produces:
@@ -195,7 +196,7 @@
 ### Task 6: Координатор (`internal/coord`)
 
 **Files:**
-- Create: `obhod/internal/coord/store.go`, `obhod/internal/coord/server.go`, `obhod/internal/coord/health.go`, тесты `store_test.go`, `server_test.go`, `health_test.go`
+- Create: `ansibles/internal/coord/store.go`, `ansibles/internal/coord/server.go`, `ansibles/internal/coord/health.go`, тесты `store_test.go`, `server_test.go`, `health_test.go`
 
 **Interfaces:**
 - Consumes: `netmap.*` (Task 3), `alert.Sender` (Task 5).
@@ -236,11 +237,11 @@
 - [ ] **Step 4:** Run: `go test ./internal/coord/` — Expected: PASS.
 - [ ] **Step 5: Commit** — `git commit -m "Add the coordinator: state, health checks and alerts"`
 
-### Task 7: Ключи и маскировки нового узла (`obhod node init`)
+### Task 7: Ключи и маскировки нового узла (`ansibles node init`)
 
 **Files:**
-- Create: `obhod/internal/node/init.go`, `obhod/internal/node/init_test.go`
-- Modify: `obhod/main.go` (команда `node init`)
+- Create: `ansibles/internal/node/init.go`, `ansibles/internal/node/init_test.go`
+- Modify: `ansibles/main.go` (команда `node init`)
 
 **Interfaces:**
 - Consumes: `keys.*`, `target.Problem` (Task 1), `netmap.*` (Task 3), `xcfg.CoordHost` (Task 4).
@@ -255,7 +256,7 @@
   }
   func Init(o InitOpts) (netmap.Node, netmap.Secrets, error)
   ```
-  CLI на сервере: `obhod node init -name N -role exit|entry -addr IP -ports P1,P2,P3 -targets S1,S2,... [-coordinator] [-etc /opt/obhod/etc]`. Пишет `secrets.json` (0640); если файл уже есть с тем же именем узла — ничего не создаёт и печатает ту же открытую часть. Печатает одну строку `OBHOD_NODE {"node": <netmap.Node>, "node_uuid": "<uuid>"}`.
+  CLI на сервере: `ansibles node init -name N -role exit|entry -addr IP -ports P1,P2,P3 -targets S1,S2,... [-coordinator] [-etc /opt/ansibles/etc]`. Пишет `secrets.json` (0640); если файл уже есть с тем же именем узла — ничего не создаёт и печатает ту же открытую часть. Печатает одну строку `ANSIBLES_NODE {"node": <netmap.Node>, "node_uuid": "<uuid>"}`.
 
 Маскировки по портам: `d1` xhttp, `d2` vision, `d3` xhttp, далее чередуются; каждой — свой сайт из подошедших, свои ключи REALITY (`keys.NewX25519`), `ShortID` (`RandHex(8)`), у xhttp — `Path` (`"/"+RandHex(12)`) и ключ шифрования (`NewX25519`). `For` = `all`. Координатор: `keys.NewSelfSignedCert(xcfg.CoordHost)`, `CoordPin` = её sha256.
 
@@ -264,23 +265,23 @@
   - `TestInitSkipsUnfitTargets`: первый сайт `Check` отвергает → он не используется.
   - `TestInitNeedsEnoughTargets`: подошло 2 сайта на 3 порта → ошибка «сайтов-масок прошло проверку 2 из 3».
   - `TestInitKeepsPrivateKeysOut`: ни одна строка из `Secrets` (приватные ключи, `NodeUUID`, ключ координатора) не встречается в `json.Marshal(node)`.
-  - `TestInitReusesExistingSecrets`: CLI дважды с одним `-etc` → одинаковая строка `OBHOD_NODE`.
+  - `TestInitReusesExistingSecrets`: CLI дважды с одним `-etc` → одинаковая строка `ANSIBLES_NODE`.
 - [ ] **Step 2:** Run: `go test ./internal/node/ -run TestInit` — Expected: FAIL.
 - [ ] **Step 3:** Реализовать `Init` и команду; `Check` в CLI — `target.Problem(t, sni, 8*time.Second)`.
 - [ ] **Step 4:** Run: `go test ./internal/node/ -run TestInit` — Expected: PASS.
 - [ ] **Step 5: Commit** — `git commit -m "Let a node create its own keys and disguises"`
 
-### Task 8: Программа узла (`obhod node run`, `obhod node seed`, `obhod coord put|status`)
+### Task 8: Программа узла (`ansibles node run`, `ansibles node seed`, `ansibles coord put|status`)
 
 **Files:**
-- Create: `obhod/internal/node/run.go`, `obhod/internal/node/coordclient.go`, `obhod/internal/node/run_test.go`
-- Modify: `obhod/main.go`
+- Create: `ansibles/internal/node/run.go`, `ansibles/internal/node/coordclient.go`, `ansibles/internal/node/run_test.go`
+- Modify: `ansibles/main.go`
 
 **Interfaces:**
 - Consumes: `xcfg.NodeConfig`, `xcfg.CoordHost`, `xcfg.CoordLocalPort` (Task 4); `xraycore.Start`, `xraycore.Instance` (Task 1); `coord.Server`, `coord.Store`, `coord.NewHealth`, `coord.RunChecks`, `coord.Report` (Task 6); `alert.Load` (Task 5).
 - Produces:
   ```go
-  type Paths struct{ Etc, Var string } // /opt/obhod/etc, /opt/obhod/var
+  type Paths struct{ Etc, Var string } // /opt/ansibles/etc, /opt/ansibles/var
   type Runner struct {
       Paths    Paths
       Version  string
@@ -294,9 +295,9 @@
   func Seed(p Paths, in io.Reader) error // {"owner": base64, "map": Signed, "roster": Signed, "telegram": {...}|null}
   ```
   Файлы узла: `etc/owner.pub`, `etc/secrets.json`, `etc/telegram.json` (только выходы), `var/map.signed`, `var/roster.signed`, у координатора `var/coord/…`.
-  Связь с координатором: HTTPS через `Instance.Dial` на `coord.obhod.invalid:443`, проверка сертификата — только совпадение sha256 с `CoordPin` из карты (`InsecureSkipVerify` + `VerifyPeerCertificate`), `Authorization: Bearer <NodeUUID>`.
-  На узле координатора ядро Xray направляет `coord.obhod.invalid` на `127.0.0.1:10443`, где в том же процессе работает `coord.Server` с сертификатом из `secrets.json`, и `coord.RunChecks`.
-  CLI: `obhod node run [-etc] [-var]`; `obhod node seed` (stdin); `obhod coord put` (stdin `{"map":…, "roster":…}`; пишет через `coord.Store`, владелец — из `etc/owner.pub`); `obhod coord status [-json]` (версии стора и `health.json`: узел, версия программы, версии карты и списка, сколько назад видели, упал ли).
+  Связь с координатором: HTTPS через `Instance.Dial` на `coord.ansibles.invalid:443`, проверка сертификата — только совпадение sha256 с `CoordPin` из карты (`InsecureSkipVerify` + `VerifyPeerCertificate`), `Authorization: Bearer <NodeUUID>`.
+  На узле координатора ядро Xray направляет `coord.ansibles.invalid` на `127.0.0.1:10443`, где в том же процессе работает `coord.Server` с сертификатом из `secrets.json`, и `coord.RunChecks`.
+  CLI: `ansibles node run [-etc] [-var]`; `ansibles node seed` (stdin); `ansibles coord put` (stdin `{"map":…, "roster":…}`; пишет через `coord.Store`, владелец — из `etc/owner.pub`); `ansibles coord status [-json]` (версии стора и `health.json`: узел, версия программы, версии карты и списка, сколько назад видели, упал ли).
 
 - [ ] **Step 1: Написать падающие тесты** (подставные `Start`, координатор — `httptest` с тем же `coord.Server`, `Dial` подставного ядра ведёт на него):
   - `TestRunStartsFromCacheWithoutCoordinator`: координатор недоступен → `Start` вызван с конфигом из сохранённой карты, `Run` не завершается до отмены контекста.
@@ -313,7 +314,7 @@
 ### Task 9: Установщик узла `node.sh.tmpl`
 
 **Files:**
-- Create: `obhod/internal/admin/node.sh.tmpl` (копия `obhod/install.sh.tmpl` с правками ниже), `obhod/internal/admin/nodesh.go`, `obhod/internal/admin/nodesh_test.go` (перенос стенда `fakeHost` и тестов предпроверки из `install_test.go`)
+- Create: `ansibles/internal/admin/node.sh.tmpl` (копия `ansibles/install.sh.tmpl` с правками ниже), `ansibles/internal/admin/nodesh.go`, `ansibles/internal/admin/nodesh_test.go` (перенос стенда `fakeHost` и тестов предпроверки из `install_test.go`)
 
 **Interfaces:**
 - Produces:
@@ -321,18 +322,18 @@
   type NodeSh struct {
       Node       string
       Ports      []int    // all disguise ports of the node, or candidates for --check
-      Init       string   // arguments for `obhod node init`, "" on update
-      Upload     string   // remote dir with obhod, geoip.dat, geosite.dat
+      Init       string   // arguments for `ansibles node init`, "" on update
+      Upload     string   // remote dir with ansibles, geoip.dat, geosite.dat
   }
   func RenderNodeSh(v NodeSh) ([]byte, error)
   ```
-  Режимы скрипта: `--check` (как сейчас плюс строки `arch: <uname -m>` и `free-ports: <свободные из Ports>`; отказ, если есть `/opt/obhod/etc/config.json` старой установки: «сначала --uninstall старой установки obhod-xray»); без флага — установка: пользователь `obhod`, `/opt/obhod/{bin,etc,var,share}` (`etc` root:obhod 0750, `var` obhod:obhod 0700), программа и geodata из `Upload`, служба `obhod` (`ExecStart=/opt/obhod/bin/obhod node run`, `Environment=XRAY_LOCATION_ASSET=/opt/obhod/share`, те же возможности на низкие порты, что сейчас), помощник firewall с портами всех маскировок (R3) и `--from` при согласии, затем `obhod node init` с `Init` и печать его строки `OBHOD_NODE`; служба не запускается. `--start` — включить и запустить службу. `--upgrade` — новая программа из `Upload` ставится, прежняя остаётся `bin/obhod.prev`, служба перезапускается. `--rollback` — вернуть `obhod.prev` и перезапустить. `--uninstall` — как сейчас.
+  Режимы скрипта: `--check` (как сейчас плюс строки `arch: <uname -m>` и `free-ports: <свободные из Ports>`; отказ, если есть `/opt/obhod/etc/config.json` старой установки: «сначала --uninstall старой установки obhod-xray»); без флага — установка: пользователь `ansibles`, `/opt/ansibles/{bin,etc,var,share}` (`etc` root:ansibles 0750, `var` ansibles:ansibles 0700), программа и geodata из `Upload`, служба `ansibles` (`ExecStart=/opt/ansibles/bin/ansibles node run`, `Environment=XRAY_LOCATION_ASSET=/opt/ansibles/share`, те же возможности на низкие порты, что сейчас), помощник firewall с портами всех маскировок (R3) и `--from` при согласии, затем `ansibles node init` с `Init` и печать его строки `ANSIBLES_NODE`; служба не запускается. `--start` — включить и запустить службу. `--upgrade` — новая программа из `Upload` ставится, прежняя остаётся `bin/ansibles.prev`, служба перезапускается. `--rollback` — вернуть `ansibles.prev` и перезапустить. `--uninstall` — как сейчас.
 
 - [ ] **Step 1: Написать падающие тесты** на стенде `fakeHost`:
-  - перенести `TestPreflightRefusals`, `TestPreflightSysvinitHost`, `TestSysvinitServiceShape`, `TestPreflightSeesIptablesClosingPorts`, `TestPreflightOpenFirewallFrom`, `TestFirewallHelperRules` с поправкой на новые имена (службы `obhod`, без загрузки Xray, без `--xray-zip`, без `--tune-network`, без UDP);
+  - перенести `TestPreflightRefusals`, `TestPreflightSysvinitHost`, `TestSysvinitServiceShape`, `TestPreflightSeesIptablesClosingPorts`, `TestPreflightOpenFirewallFrom`, `TestFirewallHelperRules` с поправкой на новые имена (службы `ansibles`, без загрузки Xray, без `--xray-zip`, без `--tune-network`, без UDP);
   - `TestCheckReportsArchAndFreePorts`: на хосте занят 443 → вывод содержит `free-ports: 8443 2053`;
   - `TestCheckRefusesOldInstall`: есть `/opt/obhod/etc/config.json` → отказ с текстом про `--uninstall`;
-  - `TestUnitRunsNodeProgram`: юнит содержит `ExecStart=/opt/obhod/bin/obhod node run` и `XRAY_LOCATION_ASSET=/opt/obhod/share`.
+  - `TestUnitRunsNodeProgram`: юнит содержит `ExecStart=/opt/ansibles/bin/ansibles node run` и `XRAY_LOCATION_ASSET=/opt/ansibles/share`.
 - [ ] **Step 2:** Run: `go test ./internal/admin/ -run 'Preflight|Check|Unit|Sysvinit|Firewall'` — Expected: FAIL.
 - [ ] **Step 3:** Сделать `node.sh.tmpl` и `RenderNodeSh` (`//go:embed node.sh.tmpl`).
 - [ ] **Step 4:** Run: `go test ./internal/admin/` — Expected: PASS; `go test ./...` — PASS (старые тесты `install_test.go` не тронуты).
@@ -341,8 +342,8 @@
 ### Task 10: Состояние ноутбука, ssh и список сайтов-масок
 
 **Files:**
-- Create: `obhod/internal/admin/state.go`, `obhod/internal/admin/ssh.go`, `obhod/internal/admin/targets.go`, тесты `state_test.go`, `ssh_test.go`, `targets_test.go`
-- Modify: `obhod/.gitignore` (`network.json`, `network.json.tmp`, `targets.txt`, `dist/`)
+- Create: `ansibles/internal/admin/state.go`, `ansibles/internal/admin/ssh.go`, `ansibles/internal/admin/targets.go`, тесты `state_test.go`, `ssh_test.go`, `targets_test.go`
+- Modify: `ansibles/.gitignore` (`network.json`, `network.json.tmp`, `targets.txt`, `dist/`)
 
 **Interfaces:**
 - Produces:
@@ -388,8 +389,8 @@
 ### Task 11: Команды владельца: `init`, `node add|rm`, `user add|rm`, `status`, `alert set`
 
 **Files:**
-- Create: `obhod/internal/admin/commands.go`, `obhod/internal/admin/commands_test.go`
-- Modify: `obhod/main.go`
+- Create: `ansibles/internal/admin/commands.go`, `ansibles/internal/admin/commands_test.go`
+- Modify: `ansibles/main.go`
 
 **Interfaces:**
 - Consumes: всё из Task 3, 9, 10; `alert.Telegram` (Task 5).
@@ -403,7 +404,7 @@
   func UserRm(e Env, name string) error
   func Status(e Env) error
   func AlertSet(e Env, tokenFile, chatID string, t alert.Sender) error
-  func push(e Env) error // signs Map and Roster with versions above the coordinator's and runs `obhod coord put` there
+  func push(e Env) error // signs Map and Roster with versions above the coordinator's and runs `ansibles coord put` there
   ```
   Кандидаты портов: `443, 8443, 2053, 2083, 2087, 2096, 9443`; узлу нужно 3 свободных.
 
@@ -411,10 +412,10 @@
 1. Проверки: имя свободно; первый узел — выход с `-coordinator`; второго координатора нет; вход — только при наличии выхода.
 2. `scripts/recon.sh` по ssh (только чтение), вывод — владельцу.
 3. `node.sh --check` с кандидатами портов и согласиями → `arch`, `free-ports`; меньше 3 свободных — стоп.
-4. Загрузка `dist/obhod-linux-<arch>`, `dist/geoip.dat`, `dist/geosite.dat` в `/tmp/obhod-upload-<имя>/` (`cat > …` через `Runner`).
-5. `node.sh` (установка, `node init`) → разбор строки `OBHOD_NODE`.
+4. Загрузка `dist/ansibles-linux-<arch>`, `dist/geoip.dat`, `dist/geosite.dat` в `/tmp/ansibles-upload-<имя>/` (`cat > …` через `Runner`).
+5. `node.sh` (установка, `node init`) → разбор строки `ANSIBLES_NODE`.
 6. Узел и его UUID — в карту и список людей (`For` = `nodes` при `EntriesOnly`); `Validate`; `push`; `Save`.
-7. `obhod node seed` на узле (владелец, подписанные части, Telegram — только выходу), затем `node.sh --start`.
+7. `ansibles node seed` на узле (владелец, подписанные части, Telegram — только выходу), затем `node.sh --start`.
 8. Ждать до 2 минут (опрос `coord status -json` раз в 10 с), пока координатор не увидит узел; не увидел — стоп «узел не вышел на связь с координатором», с подсказкой смотреть журнал службы.
 9. Для входа: перезапустить `node.sh` (без `Init`) на выходах с `EntriesOnly`, чтобы `--from` получил новый список адресов входов (R2).
 10. Напечатать порты всех маскировок для облачной консоли и проверить с ноутбука TCP-соединением, открыты ли они (неоткрытые — предупреждение, не ошибка).
@@ -432,15 +433,15 @@
   - `TestUserAddPushesRoster`: новый человек с UUID, `coord put` вызван, версия списка выросла.
   - `TestAlertSetSendsTestMessage`: подставной отправитель получил пробное сообщение; при ошибке отправки токен не сохранён.
 - [ ] **Step 2:** Run: `go test ./internal/admin/ -run 'NodeAdd|NodeRm|First|NoSecond|Entry|Push|UserAdd|AlertSet'` — Expected: FAIL.
-- [ ] **Step 3:** Реализовать команды и подключить в `main.go`: `obhod init` (создаёт `network.json`, отказывает, если он есть), `obhod node add -name -role -addr -ssh [-ssh-pass-file] [-hoster|-targets] [-upstream] [-coordinator] [-entries-only] [-open-firewall] [-install-deps]`, `obhod node rm ИМЯ`, `obhod user add|rm ИМЯ`, `obhod status`, `obhod alert set -token-file F -chat ID`. Флаг `-state` по умолчанию `network.json`.
+- [ ] **Step 3:** Реализовать команды и подключить в `main.go`: `ansibles init` (создаёт `network.json`, отказывает, если он есть), `ansibles node add -name -role -addr -ssh [-ssh-pass-file] [-hoster|-targets] [-upstream] [-coordinator] [-entries-only] [-open-firewall] [-install-deps]`, `ansibles node rm ИМЯ`, `ansibles user add|rm ИМЯ`, `ansibles status`, `ansibles alert set -token-file F -chat ID`. Флаг `-state` по умолчанию `network.json`.
 - [ ] **Step 4:** Run: `go test ./...` — Expected: PASS.
 - [ ] **Step 5: Commit** — `git commit -m "Add owner commands for the new network"`
 
-### Task 12: `obhod upgrade`
+### Task 12: `ansibles upgrade`
 
 **Files:**
-- Create: `obhod/internal/admin/upgrade.go`, `obhod/internal/admin/upgrade_test.go`
-- Modify: `obhod/main.go`
+- Create: `ansibles/internal/admin/upgrade.go`, `ansibles/internal/admin/upgrade_test.go`
+- Modify: `ansibles/main.go`
 
 **Interfaces:**
 - Consumes: `Env`, `Runner`, `RenderNodeSh` (Tasks 9–11).
@@ -450,30 +451,30 @@
 
 - [ ] **Step 1: Написать падающие тесты:** `TestUpgradeOrder` (журнал: `b`, `r`, затем `a`-координатор); `TestUpgradeRollsBackAndStops` (у `b` версия не меняется → `--rollback` на `b`, `r` и `a` не тронуты, ошибка называет `b`).
 - [ ] **Step 2:** Run: `go test ./internal/admin/ -run Upgrade` — Expected: FAIL.
-- [ ] **Step 3:** Реализовать и подключить `obhod upgrade`.
+- [ ] **Step 3:** Реализовать и подключить `ansibles upgrade`.
 - [ ] **Step 4:** Run: `go test ./...` — Expected: PASS.
 - [ ] **Step 5: Commit** — `git commit -m "Upgrade nodes one by one with rollback"`
 
 ### Task 13: Сборка `scripts/build.sh`
 
 **Files:**
-- Create: `obhod/scripts/build.sh`
-- Modify: `obhod/main.go` (`var version = "dev"`; `obhod version`)
+- Create: `ansibles/scripts/build.sh`
+- Modify: `ansibles/main.go` (`var version = "dev"`; `ansibles version`)
 
 **Interfaces:**
-- Produces: `dist/obhod-linux-amd64`, `dist/obhod-linux-arm64`, `dist/obhod` (для ноутбука), `dist/geoip.dat`, `dist/geosite.dat`, `dist/VERSION`.
+- Produces: `dist/ansibles-linux-amd64`, `dist/ansibles-linux-arm64`, `dist/ansibles` (для ноутбука), `dist/geoip.dat`, `dist/geosite.dat`, `dist/VERSION`.
 
 Сборка: `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(git describe --always --dirty)"`. Geodata: архив `Xray-linux-64.zip` выпуска `v26.11.9` с GitHub, проверка sha256 по `.dgst`, из него `geoip.dat` и `geosite.dat`. Версия Xray в скрипте — одной строкой наверху, та же, что в `go.mod` (комментарий об этом).
 
 - [ ] **Step 1:** Написать скрипт.
-- [ ] **Step 2:** Run: `scripts/build.sh && file dist/obhod-linux-arm64 && dist/obhod version` — Expected: ELF aarch64; версия совпадает с `git describe`.
+- [ ] **Step 2:** Run: `scripts/build.sh && file dist/ansibles-linux-arm64 && dist/ansibles version` — Expected: ELF aarch64; версия совпадает с `git describe`.
 - [ ] **Step 3:** Run: `go test ./...` — Expected: PASS, тесты с geodata без SKIP.
 - [ ] **Step 4: Commit** — `git commit -m "Build node binaries and fetch geodata"`
 
 ### Task 14: Лаборатория на одной машине
 
 **Files:**
-- Create: `obhod/internal/lab/lab_test.go`
+- Create: `ansibles/internal/lab/lab_test.go`
 
 **Interfaces:**
 - Consumes: `node.Init`, `node.Runner`, `node.Seed` (Tasks 7–8), `netmap.Sign` (Task 3), `coord.Health` поля `DownAfter` (Task 6).
@@ -489,15 +490,15 @@
 ### Task 15: Песочница и документация
 
 **Files:**
-- Modify: `obhod/README.md`, `obhod/PLAN.md`
+- Modify: `ansibles/README.md`, `ansibles/PLAN.md`
 
 Песочница — отдельная виртуалка владельца для экспериментов (адрес — в его личных инструкциях, не в репозитории): arm64, Oracle Linux 8, systemd, SELinux включён.
 
-- [ ] **Step 1:** `scripts/build.sh`; `dist/obhod init`; файл `targets.txt` с группой для хостера песочницы (сайты — с владельцем); `dist/obhod alert set -token-file … -chat …` (бот и чат — от владельца).
+- [ ] **Step 1:** `scripts/build.sh`; `dist/ansibles init`; файл `targets.txt` с группой для хостера песочницы (сайты — с владельцем); `dist/ansibles alert set -token-file … -chat …` (бот и чат — от владельца).
   Expected: в Telegram пришло пробное сообщение.
-- [ ] **Step 2:** `dist/obhod node add -name lab1 -role exit -coordinator -addr АДРЕС -ssh ПОЛЬЗОВАТЕЛЬ@ПЕСОЧНИЦА -hoster ГРУППА`
-  Expected: шаги по порядку без ошибок; `dist/obhod status` показывает `lab1` с версией программы и картой 1. Если служба не стартует из-за SELinux (в журнале `avc: denied`), — в `node.sh.tmpl` после копирования программы `restorecon -R /opt/obhod` при наличии команды, повторить; правку закоммитить с тестом на стенде `fakeHost`.
-- [ ] **Step 3:** `dist/obhod user add test` — Expected: за минуту `status` показывает у `lab1` список версии 2.
-- [ ] **Step 4:** Собрать заведомо падающую программу (`main` сразу выходит с ошибкой), положить в `dist/`, `dist/obhod upgrade` — Expected: откат на `lab1`, ошибка с его именем; `status` — прежняя версия, узел жив. Пересобрать нормальную, `upgrade` — Expected: новая версия.
+- [ ] **Step 2:** `dist/ansibles node add -name lab1 -role exit -coordinator -addr АДРЕС -ssh ПОЛЬЗОВАТЕЛЬ@ПЕСОЧНИЦА -hoster ГРУППА`
+  Expected: шаги по порядку без ошибок; `dist/ansibles status` показывает `lab1` с версией программы и картой 1. Если служба не стартует из-за SELinux (в журнале `avc: denied`), — в `node.sh.tmpl` после копирования программы `restorecon -R /opt/ansibles` при наличии команды, повторить; правку закоммитить с тестом на стенде `fakeHost`.
+- [ ] **Step 3:** `dist/ansibles user add test` — Expected: за минуту `status` показывает у `lab1` список версии 2.
+- [ ] **Step 4:** Собрать заведомо падающую программу (`main` сразу выходит с ошибкой), положить в `dist/`, `dist/ansibles upgrade` — Expected: откат на `lab1`, ошибка с его именем; `status` — прежняя версия, узел жив. Пересобрать нормальную, `upgrade` — Expected: новая версия.
 - [ ] **Step 5:** README: раздел «Новая сеть (этап 1)» — команды `init`, `node add`, `user add`, `status`, `upgrade`, `alert set`, файлы `network.json`, `targets.txt` (формат строки), `dist/`; что нынешние узлы пока на `legacy`. PLAN.md: строка статуса «этап 1 сделан» с датой.
 - [ ] **Step 6:** Run: `go test ./...` — Expected: PASS. Commit — `git commit -m "Document stage one of the self-steering network"`

@@ -124,6 +124,7 @@ main() {
 
   section "already installed"
   if [ -d /opt/obhod ]; then row obhod "present in /opt/obhod"; else row obhod absent; fi
+  if [ -d /opt/ansibles ]; then row ansibles "present in /opt/ansibles"; else row ansibles absent; fi
   local s
   for s in xray x-ui 3x-ui sing-box hysteria nginx apache2 httpd docker postfix exim4 dovecot; do
     if have "$s" || { have systemctl && systemctl list-unit-files 2>/dev/null | grep -q "^$s\.service"; }; then
