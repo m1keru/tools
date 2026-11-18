@@ -11,6 +11,9 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/m1keru/tools/ansibles/internal/keys"
+	"github.com/m1keru/tools/ansibles/internal/target"
 )
 
 const usage = `ansibles: несколько независимых транспортов на нескольких узлах, одна точка управления.
@@ -237,7 +240,7 @@ func cmdNode(args []string) error {
 		}
 		if (*target != "" || *sni != "") && !*rekey {
 			// The Hysteria2 certificate carries the server name.
-			if n.Hy2.CertPEM, n.Hy2.KeyPEM, n.Hy2.CertSHA256, err = newSelfSignedCert(n.Reality.ServerName); err != nil {
+			if n.Hy2.CertPEM, n.Hy2.KeyPEM, n.Hy2.CertSHA256, err = keys.NewSelfSignedCert(n.Reality.ServerName); err != nil {
 				return err
 			}
 		}
@@ -310,7 +313,7 @@ func warnTarget(n *Node) {
 	for _, w := range targetWarnings(n.Reality.ServerName) {
 		fmt.Fprintf(os.Stderr, "предупреждение (%s): %s\n", n.Name, w)
 	}
-	if w := targetProblem(n.Reality.Target, n.Reality.ServerName, 8*time.Second); w != "" {
+	if w := target.Problem(n.Reality.Target, n.Reality.ServerName, 8*time.Second); w != "" {
 		fmt.Fprintf(os.Stderr, "предупреждение (%s): %s\n", n.Name, w)
 	}
 }
